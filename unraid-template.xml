@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>LikedFM</Name>
+  <Repository>likedfm:latest</Repository>
+  <Registry>https://hub.docker.com</Registry>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/yourusername/likedfm</Support>
+  <Project>https://github.com/yourusername/likedfm</Project>
+  <Category>Music</Category>
+  <WebUI>http://[IP]:[PORT:8686]</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/yourusername/likedfm/main/unraid-template.xml</TemplateURL>
+  <Icon>https://www.last.fm/static/images/lastfm_avatar_social.jpg</Icon>
+  <DonateURL></DonateURL>
+  <Description>
+    LikedFM is a music taste sync bridge that pulls your loved and top tracks from Last.fm and automatically requests downloads through Lidarr. Similar to Jellyseerr but for music.
+  </Description>
+
+  <Networking>
+    <Mode>bridge</Mode>
+    <Publish>
+      <Port>
+        <HostPort>8686</HostPort>
+        <ContainerPort>8686</ContainerPort>
+        <Protocol>tcp</Protocol>
+      </Port>
+    </Publish>
+  </Networking>
+
+  <Data>
+    <Volume>
+      <HostDir>/mnt/user/appdata/likedfm</HostDir>
+      <ContainerDir>/app/config</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/mnt/user/music</HostDir>
+      <ContainerDir>/music</ContainerDir>
+      <Mode>ro</Mode>
+    </Volume>
+  </Data>
+
+  <Environment>
+    <Variable>
+      <Name>LASTFM_API_KEY</Name>
+      <Value></Value>
+      <Description>Your Last.fm API Key (get from https://www.last.fm/api)</Description>
+      <Display>always</Display>
+      <Required>false</Required>
+    </Variable>
+    <Variable>
+      <Name>LASTFM_SECRET</Name>
+      <Value></Value>
+      <Description>Your Last.fm API Secret</Description>
+      <Display>always</Display>
+      <Required>false</Required>
+    </Variable>
+    <Variable>
+      <Name>LASTFM_USERNAME</Name>
+      <Value></Value>
+      <Description>Your Last.fm Username</Description>
+      <Display>always</Display>
+      <Required>false</Required>
+    </Variable>
+    <Variable>
+      <Name>LIDARR_URL</Name>
+      <Value></Value>
+      <Description>Lidarr Base URL (e.g. http://lidarr:8686)</Description>
+      <Display>always</Display>
+      <Required>false</Required>
+    </Variable>
+    <Variable>
+      <Name>LIDARR_API_KEY</Name>
+      <Value></Value>
+      <Description>Your Lidarr API Key</Description>
+      <Display>always</Display>
+      <Required>false</Required>
+    </Variable>
+    <Variable>
+      <Name>MUSIC_ROOT</Name>
+      <Value>/music</Value>
+      <Description>Path to music library (should match Lidarr root folder)</Description>
+      <Display>always</Display>
+      <Required>false</Required>
+    </Variable>
+    <Variable>
+      <Name>MUSIC_PATH</Name>
+      <Value>/mnt/user/music</Value>
+      <Description>Host path to music library for volume mount</Description>
+      <Display>always</Display>
+      <Required>false</Required>
+    </Variable>
+    <Variable>
+      <Name>SYNC_INTERVAL</Name>
+      <Value>360</Value>
+      <Description>Sync interval in minutes (default: 360 = 6 hours)</Description>
+      <Display>always</Display>
+      <Required>false</Required>
+    </Variable>
+    <Variable>
+      <Name>PORT</Name>
+      <Value>8686</Value>
+      <Description>Web UI Port</Description>
+      <Display>always</Display>
+      <Required>false</Required>
+    </Variable>
+  </Environment>
+
+  <Labels></Labels>
+  <Config Name="Last.fm API Key" Target="LASTFM_API_KEY" Default="" Mode="" Description="API Key from Last.fm" Type="Variable" Display="always" Required="false" Mask="true" />
+  <Config Name="Last.fm Secret" Target="LASTFM_SECRET" Default="" Mode="" Description="API Secret from Last.fm" Type="Variable" Display="always" Required="false" Mask="true" />
+  <Config Name="Last.fm Username" Target="LASTFM_USERNAME" Default="" Mode="" Description="Your Last.fm Username" Type="Variable" Display="always" Required="false" Mask="false" />
+  <Config Name="Lidarr URL" Target="LIDARR_URL" Default="" Mode="" Description="Lidarr Base URL" Type="Variable" Display="always" Required="false" Mask="false" />
+  <Config Name="Lidarr API Key" Target="LIDARR_API_KEY" Default="" Mode="" Description="Lidarr API Key" Type="Variable" Display="always" Required="false" Mask="true" />
+  <Config Name="Music Root" Target="MUSIC_ROOT" Default="/music" Mode="" Description="Container path to music library" Type="Variable" Display="always" Required="false" Mask="false" />
+  <Config Name="Host Music Path" Target="MUSIC_PATH" Default="/mnt/user/music" Mode="" Description="Host path to music library" Type="Variable" Display="always" Required="false" Mask="false" />
+  <Config Name="Sync Interval (minutes)" Target="SYNC_INTERVAL" Default="360" Mode="" Description="How often to sync (in minutes)" Type="Variable" Display="always" Required="false" Mask="false" />
+  <Config Name="Port" Target="PORT" Default="8686" Mode="" Description="Web UI port" Type="Variable" Display="always" Required="false" Mask="false" />
+  <Config Name="Config Path" Target="/app/config" Default="/mnt/user/appdata/likedfm" Mode="rw" Description="Appdata Path" Type="Path" Display="always" Required="true" Mask="false" />
+  <Config Name="Music Path" Target="/music" Default="/mnt/user/music" Mode="ro" Description="Music Library Path (read-only)" Type="Path" Display="always" Required="true" Mask="false" />
+</Container>

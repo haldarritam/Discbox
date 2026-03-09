@@ -1,0 +1,55 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Track {
+  id               Int       @id @default(autoincrement())
+  artist           String
+  title            String
+  lastfm_url       String?
+  album_art_url    String?
+  play_count       Int       @default(0)
+  loved            Boolean   @default(false)
+  status           String    @default("pending") // pending | requested | downloaded | ignored
+  lidarr_artist_id Int?
+  lidarr_album_id  Int?
+  lidarr_track_id  Int?
+  requested_at     DateTime?
+  downloaded_at    DateTime?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  @@unique([artist, title])
+}
+
+model SyncLog {
+  id           Int      @id @default(autoincrement())
+  synced_at    DateTime @default(now())
+  tracks_found Int
+  tracks_added Int
+  source       String // "loved" | "top" | "both"
+}
+
+model Settings {
+  id               Int     @id @default(1)
+  lastfm_api_key   String?
+  lastfm_secret    String?
+  lastfm_username  String?
+  lidarr_url       String?
+  lidarr_api_key   String?
+  music_root       String  @default("/music")
+  sync_interval    Int     @default(360) // minutes
+  min_play_count   Int     @default(1)
+  sync_loved       Boolean @default(true)
+  sync_top         Boolean @default(true)
+  top_period       String  @default("1month") // 7day | 1month | 3month | 6month | 12month | overall
+  updated_at       DateTime @updatedAt
+}
