@@ -31,6 +31,18 @@ model Track {
   created_at        DateTime  @default(now())
   updated_at        DateTime  @updatedAt
 
+  // Extended metadata from Deezer
+  isrc              String?
+  release_date      String?
+  track_position    Int?
+  disk_number       Int?
+  bpm               Float?
+  duration          Int?
+  explicit_lyrics   Boolean?
+  deezer_id         String?
+  contributors      String?
+  account_label     String?
+
   @@unique([artist, title])
 }
 
@@ -72,4 +84,14 @@ model AlbumBookmark {
   added_at  DateTime @default(now())
 
   @@unique([artist, album])
+}
+
+model DeezerAccount {
+  id             Int      @id @default(autoincrement())
+  user_id        String   @unique
+  label          String?
+  sync_loved     Boolean  @default(true)
+  sync_albums    Boolean  @default(true)
+  sync_playlists Boolean  @default(true)
+  created_at     DateTime @default(now())
 }

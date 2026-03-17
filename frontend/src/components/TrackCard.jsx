@@ -3,8 +3,11 @@ import StatusBadge from './StatusBadge';
 
 export default function TrackCard({
   track,
+  selected,
+  onSelect,
   onIgnore,
   onUnignore,
+  onUnblock,
   onDownload,
   onRetry,
 }) {
@@ -66,8 +69,17 @@ export default function TrackCard({
   };
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-gray-600 transition">
+    <div className={`bg-gray-800 rounded-lg p-4 border transition cursor-pointer ${selected ? 'border-indigo-500 bg-gray-750' : 'border-gray-700 hover:border-gray-600'}`} onClick={() => onSelect && onSelect(track.id)}>
       <div className="flex gap-4">
+        {/* Checkbox */}
+        <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onChange={() => onSelect && onSelect(track.id)}
+            className="w-4 h-4 accent-indigo-500 cursor-pointer"
+          />
+        </div>
         {track.album_art_url ? (
           <img
             src={track.album_art_url}
@@ -87,6 +99,11 @@ export default function TrackCard({
           <div className="flex items-center gap-2 mt-2 flex-wrap">
             <StatusBadge status={localStatus} />
             {getSourceBadge()}
+            {track.account_label && (
+              <span className="text-xs bg-gray-700 text-gray-300 px-2 py-1 rounded">
+                👤 {track.account_label}
+              </span>
+            )}
           </div>
 
           {/* Progress Bar */}
@@ -140,16 +157,25 @@ export default function TrackCard({
               </button>
             )}
 
-            <button
-              onClick={handleIgnoreClick}
-              className={`text-xs px-3 py-1 rounded transition ${
-                localStatus === 'ignored'
-                  ? 'bg-green-900 hover:bg-green-800 text-green-400'
-                  : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
-              }`}
-            >
-              {localStatus === 'ignored' ? 'Restore' : 'Ignore'}
-            </button>
+            {localStatus === 'blocked' ? (
+              <button
+                onClick={() => onUnblock && onUnblock(track.id)}
+                className="text-xs px-3 py-1 rounded bg-yellow-800 hover:bg-yellow-700 text-yellow-300 transition"
+              >
+                🔓 Unblock
+              </button>
+            ) : (
+              <button
+                onClick={handleIgnoreClick}
+                className={`text-xs px-3 py-1 rounded transition ${
+                  localStatus === 'ignored'
+                    ? 'bg-green-900 hover:bg-green-800 text-green-400'
+                    : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+                }`}
+              >
+                {localStatus === 'ignored' ? 'Restore' : 'Ignore'}
+              </button>
+            )}
           </div>
 
           {track.downloaded_at && (

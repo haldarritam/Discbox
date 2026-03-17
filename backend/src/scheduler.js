@@ -3,6 +3,7 @@ const fs = require('fs');
 const { PrismaClient } = require('@prisma/client');
 const LastFMService = require('./services/lastfm');
 const YTDLPService = require('./services/ytdlp');
+const DeezerService = require('./services/deezer');
 
 const prisma = new PrismaClient();
 
@@ -113,23 +114,16 @@ class SyncScheduler {
         where: { id: 1 },
       });
 
-      if (!settings?.lastfm_api_key) {
-        console.log('Sync: Last.fm settings incomplete, aborting');
-        this.isRunning = false;
-        return;
-      }
-
-      const lastfm = new LastFMService(
-        settings.lastfm_api_key,
-        settings.lastfm_secret,
-        settings.lastfm_username
-      );
+      const hasLastfmConfig = settings?.lastfm_api_key && settings?.lastfm_username;
+      const lastfm = hasLastfmConfig
+        ? new LastFMService(settings.lastfm_api_key, settings.lastfm_secret, settings.lastfm_username)
+        : null;
 
       // Collect all tracks from various sources
       const collectedTracks = [];
 
-      // Step 1: Fetch loved tracks
-      if (settings.sync_loved) {
+      // Step 1: Fetch loved tracks from Last.fm (optional)
+      if (hasLastfmConfig && lastfm && settings.sync_loved) {
         try {
           console.log('Sync: Fetching loved tracks from Last.fm');
           const loved = await lastfm.getLovedTracks();
@@ -174,21 +168,66 @@ class SyncScheduler {
       // Step 3: Playlist sync disabled (user.getplaylists deprecated by Last.fm)
 
 
+
+      // Step 4: Deezer sync
+      const deezerAccounts = await prisma.deezerAccount.findMany();
+      for (const account of deezerAccounts) {
+        const deezer = new DeezerService(account.user_id);
+        const label = account.label || account.user_id;
+        console.log(`[deezer] Syncing account: ${label}`);
+        try {
+          if (account.sync_loved) {
+            const loved = await deezer.getLovedTracks();
+            console.log(`[deezer] ${label}: Found ${loved.length} loved tracks`);
+            collectedTracks.push(...loved.map(t => ({ ...t, account_label: label })));
+          }
+        } catch (err) {
+          console.error(`[deezer] ${label}: Failed to fetch loved tracks:`, err.message);
+        }
+        try {
+          if (account.sync_albums) {
+            const albumTracks = await deezer.getSavedAlbums();
+            console.log(`[deezer] ${label}: Found ${albumTracks.length} album tracks`);
+            collectedTracks.push(...albumTracks.map(t => ({ ...t, account_label: label })));
+          }
+        } catch (err) {
+          console.error(`[deezer] ${label}: Failed to fetch album tracks:`, err.message);
+        }
+        try {
+          if (account.sync_playlists) {
+            const playlistTracks = await deezer.getPlaylistTracks();
+            console.log(`[deezer] ${label}: Found ${playlistTracks.length} playlist tracks`);
+            collectedTracks.push(...playlistTracks.map(t => ({ ...t, account_label: label })));
+          }
+        } catch (err) {
+          console.error(`[deezer] ${label}: Failed to fetch playlist tracks:`, err.message);
+        }
+      }
       syncStats.tracksFound = collectedTracks.length;
       console.log(
         `Sync: Total collected ${collectedTracks.length} tracks from all sources`
       );
 
-      // Step 4: Deduplicate tracks by (artist + title), keep "loved" source as priority
+      // Step 4: Deduplicate tracks by (primary artist + title), keep "loved" source as priority
+      // Primary artist = first artist before any comma/feat/& to handle multi-artist differences
+      // e.g. "Pritam, Atif Aslam" and "Pritam" both normalize to "pritam"
+      const primaryArtist = (artist) => artist
+        .toLowerCase()
+        .split(/,|feat\.|ft\.|&/)[0]
+        .trim();
+
       const dedupeMap = new Map();
       for (const track of collectedTracks) {
-        const key = `${track.artist.toLowerCase()}|${track.title.toLowerCase()}`;
+        const key = `${primaryArtist(track.artist)}|${track.title.toLowerCase()}`;
         const existing = dedupeMap.get(key);
 
         if (!existing) {
           dedupeMap.set(key, track);
         } else if (track.source === 'loved') {
-          // Prioritize loved tracks
+          // Last.fm loved takes highest priority
+          dedupeMap.set(key, track);
+        } else if (track.source === 'deezer_loved' && existing.source !== 'loved') {
+          // Deezer loved takes priority over album/playlist sources
           dedupeMap.set(key, track);
         }
       }
@@ -211,7 +250,9 @@ class SyncScheduler {
             },
           });
 
-          if (!existing) {
+          if (existing?.status === 'blocked') {
+            // Track is blocked — skip re-adding
+          } else if (!existing) {
             await prisma.track.create({
               data: {
                 artist: track.artist,
@@ -223,6 +264,16 @@ class SyncScheduler {
                 source: track.source,
                 album_name: track.album_name || null,
                 playlist_name: track.playlist_name || null,
+                isrc: track.isrc || null,
+                release_date: track.release_date || null,
+                track_position: track.track_position || null,
+                disk_number: track.disk_number || null,
+                bpm: track.bpm || null,
+                duration: track.duration || null,
+                explicit_lyrics: track.explicit_lyrics || false,
+                deezer_id: track.deezer_id || null,
+                contributors: track.contributors || null,
+                account_label: track.account_label || null,
               },
             });
             tracksAdded++;
@@ -251,7 +302,13 @@ class SyncScheduler {
 
       // Step 6: Process pending tracks for download
       const pendingTracks = await prisma.track.findMany({
-        where: { status: 'pending' },
+        where: {
+          status: 'pending',
+          OR: [
+            { requested_at: null },
+            { requested_at: { lte: new Date() } },
+          ],
+        },
         orderBy: { created_at: 'desc' },
       });
 
@@ -382,6 +439,7 @@ class SyncScheduler {
           format: settings.audio_format || 'mp3',
           quality: settings.audio_quality || '320k',
           outputDir: settings.music_output_dir || '/music',
+          track,
           onProgress: (progress) => {
             this.emitEvent({
               type: 'download_progress',
@@ -396,15 +454,9 @@ class SyncScheduler {
       );
 
       if (downloadResult.success) {
-        // Tag the file with clean Last.fm metadata
+        // Tag the file with all available metadata
         if (downloadResult.filePath) {
-          await YTDLPService.tagFile(
-            downloadResult.filePath,
-            track.artist,
-            track.title,
-            track.album_name || null,
-            track.album_art_url || null
-          );
+          await YTDLPService.tagFile(downloadResult.filePath, track);
         }
 
         await prisma.track.update({
@@ -464,27 +516,46 @@ class SyncScheduler {
           });
         } else {
           const retryCount = (track.retry_count || 0) + 1;
-          await prisma.track.update({
-            where: { id: track.id },
-            data: {
-              status: 'failed',
-              download_error: downloadResult.error,
-              retry_count: retryCount,
-            },
-          });
-          syncStats.tracksFailed++;
+          const errMsg = downloadResult.error || '';
 
-          console.error(
-            `Download failed for "${track.artist}" - "${track.title}" (attempt ${retryCount}):`,
-            downloadResult.error
-          );
+          // Detect YouTube premiere — reset to pending after the wait time
+          const premiereMatch = errMsg.match(/Premieres in (\d+) hours?/i);
+          if (premiereMatch) {
+            const hoursUntil = parseInt(premiereMatch[1]) + 1;
+            const retryAt = new Date(Date.now() + hoursUntil * 60 * 60 * 1000);
+            await prisma.track.update({
+              where: { id: track.id },
+              data: {
+                status: 'pending',
+                download_error: `Premiere — auto-retry after ${retryAt.toISOString()}`,
+                retry_count: 0,
+                requested_at: retryAt,
+              },
+            });
+            console.log(`[scheduler] Premiere detected for "${track.artist}" - "${track.title}", will retry in ${hoursUntil}h`);
+          } else {
+            await prisma.track.update({
+              where: { id: track.id },
+              data: {
+                status: 'failed',
+                download_error: errMsg,
+                retry_count: retryCount,
+              },
+            });
+            syncStats.tracksFailed++;
 
-          this.emitEvent({
-            type: 'track_failed',
-            trackId: track.id,
-            error: downloadResult.error,
-            timestamp: new Date(),
-          });
+            console.error(
+              `Download failed for "${track.artist}" - "${track.title}" (attempt ${retryCount}):`,
+              errMsg
+            );
+
+            this.emitEvent({
+              type: 'track_failed',
+              trackId: track.id,
+              error: errMsg,
+              timestamp: new Date(),
+            });
+          }
         }
       }
     } catch (error) {
@@ -544,19 +615,32 @@ async function runFileScanner() {
       if (track.file_path && fs.existsSync(track.file_path)) {
         filesVerified++;
       } else {
-        // File is missing - mark for retry
-        filesNotFound++;
-        console.warn(`[scanner] File not found for "${track.artist}" - "${track.title}": ${track.file_path}`);
-        
-        // Reset to pending for retry if under max retries
-        await prisma.track.update({
-          where: { id: track.id },
-          data: {
-            status: 'pending',
-            download_error: null,
-            retry_count: 0, // Reset retry count
-          },
-        });
+        // File missing at stored path — try to find it at new location first
+        const settings = await prisma.settings.findUnique({ where: { id: 1 } });
+        const outputDir = settings?.music_output_dir || '/music';
+        const foundFile = YTDLPService.findDownloadedFile(outputDir, track.artist, track.title);
+
+        if (foundFile) {
+          // Found at new location — update path, keep downloaded status
+          filesVerified++;
+          console.log(`[scanner] Updated path for "${track.artist}" - "${track.title}": ${foundFile}`);
+          await prisma.track.update({
+            where: { id: track.id },
+            data: { file_path: foundFile },
+          });
+        } else {
+          // Truly missing — reset to pending for re-download
+          filesNotFound++;
+          console.warn(`[scanner] File not found for "${track.artist}" - "${track.title}": ${track.file_path}`);
+          await prisma.track.update({
+            where: { id: track.id },
+            data: {
+              status: 'pending',
+              download_error: null,
+              retry_count: 0,
+            },
+          });
+        }
       }
     }
 
@@ -587,16 +671,16 @@ async function runFileScanner() {
         retriesQueued++;
         console.log(`[scanner] Queued retry ${retryCount + 1}/${maxRetries} for "${track.artist}" - "${track.title}"`);
       } else {
-        // Max retries exceeded - keep as failed with error message
+        // Max retries exceeded — only update error message if not already finalized
         retriesExhausted++;
-        const finalError = `Failed after ${maxRetries} retry attempts. ${track.download_error || 'Unknown error'}`;
-        await prisma.track.update({
-          where: { id: track.id },
-          data: {
-            download_error: finalError,
-          },
-        });
-        console.log(`[scanner] Retries exhausted for "${track.artist}" - "${track.title}": ${finalError}`);
+        if (!(track.download_error || '').startsWith('Failed after')) {
+          const finalError = `Failed after ${maxRetries} retry attempts. ${track.download_error || 'Unknown error'}`;
+          await prisma.track.update({
+            where: { id: track.id },
+            data: { download_error: finalError },
+          });
+          console.log(`[scanner] Retries exhausted for "${track.artist}" - "${track.title}"`);
+        }
       }
     }
 

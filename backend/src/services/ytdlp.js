@@ -170,6 +170,7 @@ class YTDLPService {
       quality = '320k',
       outputDir = '/music',
       onProgress = null,
+      track = {},
     } = options;
 
     // Log the resolved output directory for debugging
@@ -195,12 +196,14 @@ class YTDLPService {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         return await new Promise((resolve, reject) => {
-          const safeArtist = artist.replace(/[<>:"/\\|?*]/g, "").trim()
-          const outputTemplate = path.join(
-            outputDir,
-            safeArtist,
-            `${title}.${format}`
-          );
+          const sanitize = (str) => (str || '').replace(/[<>:"\/\\|?*]/g, '').replace(/\//g, '-').trim()
+          const safeArtist = sanitize(artist)
+          const safeAlbum = sanitize(track.album_name || '')
+          const safeTitle = sanitize(title)
+          const trackNum = track.track_position ? String(track.track_position).padStart(2, '0') + ' - ' : ''
+          const outputTemplate = safeAlbum
+            ? path.join(outputDir, safeArtist, safeAlbum, `${trackNum}${safeTitle}.${format}`)
+            : path.join(outputDir, safeArtist, `${safeTitle}.${format}`)
 
           const args = [
             '-x',
@@ -365,9 +368,14 @@ class YTDLPService {
       
       // Match if filename contains title, and either:
       // 1. Parent directory contains artist name, OR
-      // 2. Filename contains both artist and title
+      // 2. Grandparent directory contains artist name (new Album/Artist structure), OR
+      // 3. Filename contains both artist and title
+      const grandParentDir = normalize(
+        path.basename(path.dirname(path.dirname(filePath)))
+      );
       if (fileName.includes(normalizedTitle)) {
-        if (parentDir.includes(normalizedArtist) || 
+        if (parentDir.includes(normalizedArtist) ||
+            grandParentDir.includes(normalizedArtist) ||
             fileName.includes(normalizedArtist)) {
           return filePath;
         }
@@ -376,25 +384,46 @@ class YTDLPService {
     
     return null;
   }
-  static async tagFile(filePath, artist, title, album, albumArtUrl) {
+  static async tagFile(filePath, track) {
     return new Promise((resolve) => {
       const taggerPath = path.join(__dirname, 'tagger.py')
-      const args = [taggerPath, filePath, artist || '', title || '', album || 'null', albumArtUrl || 'null']
-      console.log(`[tagger] Tagging: ${artist} - ${title}`)
-      const proc = spawn('python3', args)
+      const tmpJson = path.join('/tmp', `tag_${Date.now()}.json`)
+
+      const meta = {
+        filepath: filePath,
+        artist: track.artist || '',
+        title: track.title || '',
+        album: track.album_name || null,
+        album_art_url: track.album_art_url || null,
+        contributors: track.contributors || null,
+        track_position: track.track_position || null,
+        disk_number: track.disk_number || null,
+        release_date: track.release_date || null,
+        bpm: track.bpm || null,
+        isrc: track.isrc || null,
+      }
+
+      fs.writeFileSync(tmpJson, JSON.stringify(meta))
+      console.log(`[tagger] Tagging: ${track.artist} - ${track.title}`)
+
+      const proc = spawn('python3', [taggerPath, tmpJson])
       let error = ''
-      proc.stdout.on('data', (data) => { console.log('[tagger]', data.toString().trim()) })
+      proc.stdout.on('data', (data) => { console.log(data.toString().trim()) })
       proc.stderr.on('data', (data) => { error += data.toString(); console.warn('[tagger]', data.toString().trim()) })
       proc.on('close', (code) => {
+        try { fs.unlinkSync(tmpJson) } catch {}
         if (code === 0) {
-          console.log(`[tagger] Tagged: ${filePath}`)
+          // tagger.py already logs success
           resolve({ success: true })
         } else {
           console.warn(`[tagger] Failed for ${filePath}: ${error}`)
           resolve({ success: false, error })
         }
       })
-      proc.on('error', (err) => { resolve({ success: false, error: err.message }) })
+      proc.on('error', (err) => {
+        try { fs.unlinkSync(tmpJson) } catch {}
+        resolve({ success: false, error: err.message })
+      })
     })
   }
 

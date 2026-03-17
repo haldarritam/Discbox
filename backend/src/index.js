@@ -20,6 +20,7 @@ const settingsRouter = require('./routes/settings');
 const statsRouter = require('./routes/stats');
 const eventsRouter = require('./routes/events');
 const bookmarksRouter = require('./routes/bookmarks');
+const deezerRouter = require('./routes/deezer');
 const { startFileScanner } = require('./scheduler');
 
 // Set sync service for the sync route
@@ -37,6 +38,7 @@ app.use('/api/settings', settingsRouter);
 app.use('/api/stats', statsRouter);
 app.use('/api/events', eventsRouter);
 app.use('/api/bookmarks', bookmarksRouter);
+app.use('/api/deezer', deezerRouter);
 
 /**
  * GET /health

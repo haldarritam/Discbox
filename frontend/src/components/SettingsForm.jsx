@@ -1,10 +1,92 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 export default function SettingsForm({ onSave, initialSettings }) {
   const [formData, setFormData] = useState(initialSettings || {});
   const [loading, setLoading] = useState(false);
   const [testResults, setTestResults] = useState(null);
   const [message, setMessage] = useState('');
+  const [deezerAccounts, setDeezerAccounts] = useState([]);
+  const [deezerForm, setDeezerForm] = useState({ user_id: '', label: '', sync_loved: true, sync_albums: true, sync_playlists: true });
+  const [deezerTestResult, setDeezerTestResult] = useState(null);
+  const [deezerLoading, setDeezerLoading] = useState(false);
+  const [deezerMessage, setDeezerMessage] = useState('');
+
+  useEffect(() => {
+    fetchDeezerAccounts();
+  }, []);
+
+  const fetchDeezerAccounts = async () => {
+    try {
+      const res = await fetch('/api/deezer/accounts');
+      const data = await res.json();
+      setDeezerAccounts(data);
+    } catch (err) {
+      console.error('Failed to fetch Deezer accounts:', err);
+    }
+  };
+
+  const handleDeezerTest = async () => {
+    if (!deezerForm.user_id) return;
+    setDeezerLoading(true);
+    setDeezerTestResult(null);
+    try {
+      const res = await fetch(`/api/deezer/test/${deezerForm.user_id}`);
+      const data = await res.json();
+      setDeezerTestResult(data);
+    } catch (err) {
+      setDeezerTestResult({ success: false, error: err.message });
+    } finally {
+      setDeezerLoading(false);
+    }
+  };
+
+  const handleDeezerAdd = async () => {
+    if (!deezerForm.user_id) return;
+    setDeezerLoading(true);
+    setDeezerMessage('');
+    try {
+      const res = await fetch('/api/deezer/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(deezerForm),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to add account');
+      setDeezerAccounts((prev) => [...prev, data]);
+      setDeezerForm({ user_id: '', label: '', sync_loved: true, sync_albums: true, sync_playlists: true });
+      setDeezerTestResult(null);
+      setDeezerMessage('Account added!');
+      setTimeout(() => setDeezerMessage(''), 3000);
+    } catch (err) {
+      setDeezerMessage(`Error: ${err.message}`);
+    } finally {
+      setDeezerLoading(false);
+    }
+  };
+
+  const handleDeezerDelete = async (id) => {
+    try {
+      await fetch(`/api/deezer/accounts/${id}`, { method: 'DELETE' });
+      setDeezerAccounts((prev) => prev.filter((a) => a.id !== id));
+    } catch (err) {
+      console.error('Failed to delete account:', err);
+    }
+  };
+
+  const handleDeezerToggle = async (account, field) => {
+    const updated = { ...account, [field]: !account[field] };
+    try {
+      const res = await fetch(`/api/deezer/accounts/${account.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [field]: !account[field] }),
+      });
+      const data = await res.json();
+      setDeezerAccounts((prev) => prev.map((a) => a.id === account.id ? data : a));
+    } catch (err) {
+      console.error('Failed to update account:', err);
+    }
+  };
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -350,6 +432,110 @@ export default function SettingsForm({ onSave, initialSettings }) {
             )}
           </div>
         )}
+
+        {/* Deezer Accounts */}
+        <div className="space-y-3">
+          <h3 className="font-semibold text-white text-lg">Deezer Accounts</h3>
+          <p className="text-xs text-gray-400">
+            Go to deezer.com, open your profile — the number in the URL is your User ID. Your profile must be set to Public.
+          </p>
+
+          {deezerMessage && (
+            <div className={`p-2 rounded text-sm ${deezerMessage.includes('Error') ? 'bg-red-900 text-red-200' : 'bg-green-900 text-green-200'}`}>
+              {deezerMessage}
+            </div>
+          )}
+
+          {/* Saved accounts */}
+          {deezerAccounts.length > 0 && (
+            <div className="space-y-2">
+              {deezerAccounts.map((account) => (
+                <div key={account.id} className="bg-gray-700 rounded p-3 border border-gray-600">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <p className="text-white font-medium">{account.label || account.user_id}</p>
+                      {account.label && <p className="text-gray-400 text-xs">ID: {account.user_id}</p>}
+                    </div>
+                    <button
+                      onClick={() => handleDeezerDelete(account.id)}
+                      className="text-red-400 hover:text-red-300 text-sm"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                  <div className="flex gap-4 mt-2 text-sm">
+                    <label className="flex items-center gap-1 text-gray-300 cursor-pointer">
+                      <input type="checkbox" checked={account.sync_loved} onChange={() => handleDeezerToggle(account, 'sync_loved')} />
+                      ❤️ Loved
+                    </label>
+                    <label className="flex items-center gap-1 text-gray-300 cursor-pointer">
+                      <input type="checkbox" checked={account.sync_albums} onChange={() => handleDeezerToggle(account, 'sync_albums')} />
+                      💿 Albums
+                    </label>
+                    <label className="flex items-center gap-1 text-gray-300 cursor-pointer">
+                      <input type="checkbox" checked={account.sync_playlists} onChange={() => handleDeezerToggle(account, 'sync_playlists')} />
+                      📋 Playlists
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Add account form */}
+          <div className="bg-gray-700 rounded p-3 border border-gray-600 space-y-2">
+            <p className="text-gray-300 text-sm font-medium">Add Deezer Account</p>
+            <input
+              type="text"
+              placeholder="Deezer User ID (e.g. 123456789)"
+              value={deezerForm.user_id}
+              onChange={(e) => setDeezerForm({ ...deezerForm, user_id: e.target.value })}
+              className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 text-sm"
+            />
+            <input
+              type="text"
+              placeholder="Label (optional, e.g. My Account)"
+              value={deezerForm.label}
+              onChange={(e) => setDeezerForm({ ...deezerForm, label: e.target.value })}
+              className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 text-sm"
+            />
+            <div className="flex gap-4 text-sm">
+              <label className="flex items-center gap-1 text-gray-300 cursor-pointer">
+                <input type="checkbox" checked={deezerForm.sync_loved} onChange={(e) => setDeezerForm({ ...deezerForm, sync_loved: e.target.checked })} />
+                ❤️ Loved
+              </label>
+              <label className="flex items-center gap-1 text-gray-300 cursor-pointer">
+                <input type="checkbox" checked={deezerForm.sync_albums} onChange={(e) => setDeezerForm({ ...deezerForm, sync_albums: e.target.checked })} />
+                💿 Albums
+              </label>
+              <label className="flex items-center gap-1 text-gray-300 cursor-pointer">
+                <input type="checkbox" checked={deezerForm.sync_playlists} onChange={(e) => setDeezerForm({ ...deezerForm, sync_playlists: e.target.checked })} />
+                📋 Playlists
+              </label>
+            </div>
+            {deezerTestResult && (
+              <p className={`text-sm ${deezerTestResult.success ? 'text-green-400' : 'text-red-400'}`}>
+                {deezerTestResult.success ? `✓ Found: ${deezerTestResult.name}` : `✗ ${deezerTestResult.error}`}
+              </p>
+            )}
+            <div className="flex gap-2">
+              <button
+                onClick={handleDeezerTest}
+                disabled={deezerLoading || !deezerForm.user_id}
+                className="bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 text-white px-4 py-1.5 rounded text-sm font-semibold transition"
+              >
+                {deezerLoading ? 'Testing...' : 'Test'}
+              </button>
+              <button
+                onClick={handleDeezerAdd}
+                disabled={deezerLoading || !deezerForm.user_id}
+                className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white px-4 py-1.5 rounded text-sm font-semibold transition"
+              >
+                {deezerLoading ? 'Adding...' : 'Add Account'}
+              </button>
+            </div>
+          </div>
+        </div>
 
         {/* Action Buttons */}
         <div className="flex flex-wrap gap-3 pt-4">
