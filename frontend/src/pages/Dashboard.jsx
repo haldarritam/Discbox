@@ -306,15 +306,19 @@ export default function Dashboard() {
         <div className="mb-6">
           <h3 className="text-sm font-semibold text-gray-300 mb-2">Source</h3>
           <div className="flex gap-2 overflow-x-auto">
-            {['all', 'loved', 'album', 'playlist'].map((source) => (
-              <button key={source} onClick={() => setSourceFilter(source)}
+            {[
+              { value: 'all', label: 'All Sources' },
+              { value: 'deezer_loved', label: '❤️ Loved' },
+              { value: 'deezer_album', label: '💿 Albums' },
+              { value: 'deezer_playlist', label: '📋 Playlists' },
+              { value: 'loved', label: '🎵 Last.fm' },
+              { value: 'manual', label: '✋ Manual' },
+            ].map(({ value, label }) => (
+              <button key={value} onClick={() => setSourceFilter(value)}
                 className={`px-4 py-2 rounded-lg font-semibold transition whitespace-nowrap text-sm ${
-                  sourceFilter === source ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  sourceFilter === value ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
                 }`}>
-                {source === 'all' && 'All Sources'}
-                {source === 'loved' && '❤️ Loved'}
-                {source === 'album' && '💿 Albums'}
-                {source === 'playlist' && '📋 Playlists'}
+                {label}
               </button>
             ))}
           </div>
