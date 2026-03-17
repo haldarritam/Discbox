@@ -1,19 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Container version="2">
   <Name>Discbox</Name>
-  <Repository>discbox:latest</Repository>
-  <Registry>https://hub.docker.com</Registry>
+  <Repository>haldarritam/discbox:latest</Repository>
+  <Registry>https://hub.docker.com/r/haldarritam/discbox</Registry>
   <Network>bridge</Network>
   <Privileged>false</Privileged>
-  <Support>https://github.com/yourusername/discbox</Support>
-  <Project>https://github.com/yourusername/discbox</Project>
-  <Category>Music</Category>
+  <Support>https://github.com/haldarritam/Discbox/issues</Support>
+  <Project>https://github.com/haldarritam/Discbox</Project>
+  <Category>Music:</Category>
   <WebUI>http://[IP]:[PORT:8767]</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/yourusername/discbox/main/unraid-template.xml</TemplateURL>
-  <Icon>https://www.last.fm/static/images/lastfm_avatar_social.jpg</Icon>
-  <DonateURL></DonateURL>
+  <TemplateURL>https://raw.githubusercontent.com/haldarritam/Discbox/main/unraid-template.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/haldarritam/Discbox/main/icon.png</Icon>
   <Description>
-    Discbox is a music automation bridge that pulls your loved tracks, library albums, and playlists from Last.fm and automatically downloads them from YouTube using yt-dlp. Similar to Jellyseerr but for music.
+    Discbox is a self-hosted music automation app that syncs your loved tracks, saved albums, and playlists from Deezer (and optionally Last.fm) and automatically downloads them from YouTube via yt-dlp. Files are saved in a Navidrome-compatible folder structure with full metadata embedded.
   </Description>
 
   <Networking>
@@ -42,37 +41,9 @@
 
   <Environment>
     <Variable>
-      <Name>LASTFM_API_KEY</Name>
-      <Value></Value>
-      <Description>Your Last.fm API Key (get from https://www.last.fm/api)</Description>
-      <Display>always</Display>
-      <Required>false</Required>
-    </Variable>
-    <Variable>
-      <Name>LASTFM_SECRET</Name>
-      <Value></Value>
-      <Description>Your Last.fm API Secret</Description>
-      <Display>always</Display>
-      <Required>false</Required>
-    </Variable>
-    <Variable>
-      <Name>LASTFM_USERNAME</Name>
-      <Value></Value>
-      <Description>Your Last.fm Username</Description>
-      <Display>always</Display>
-      <Required>false</Required>
-    </Variable>
-    <Variable>
-      <Name>MUSIC_OUTPUT_DIR</Name>
-      <Value>/music</Value>
-      <Description>Directory where downloaded music will be saved (container path)</Description>
-      <Display>always</Display>
-      <Required>false</Required>
-    </Variable>
-    <Variable>
       <Name>AUDIO_FORMAT</Name>
       <Value>mp3</Value>
-      <Description>Audio format for downloads: mp3 | flac | opus | m4a</Description>
+      <Description>Audio format: mp3 | flac | opus | m4a</Description>
       <Display>always</Display>
       <Required>false</Required>
     </Variable>
@@ -86,14 +57,7 @@
     <Variable>
       <Name>MAX_CONCURRENT_DOWNLOADS</Name>
       <Value>2</Value>
-      <Description>How many tracks to download simultaneously (1-5)</Description>
-      <Display>always</Display>
-      <Required>false</Required>
-    </Variable>
-    <Variable>
-      <Name>SEARCH_PREFERENCE</Name>
-      <Value>auto</Value>
-      <Description>YouTube search mode: auto | official_audio | lyrics</Description>
+      <Description>Parallel downloads (1-5)</Description>
       <Display>always</Display>
       <Required>false</Required>
     </Variable>
@@ -104,58 +68,14 @@
       <Display>always</Display>
       <Required>false</Required>
     </Variable>
-    <Variable>
-      <Name>SYNC_LOVED</Name>
-      <Value>true</Value>
-      <Description>Sync loved tracks: true | false</Description>
-      <Display>always</Display>
-      <Required>false</Required>
-    </Variable>
-    <Variable>
-      <Name>SYNC_ALBUMS</Name>
-      <Value>true</Value>
-      <Description>Sync tracks from your Last.fm library albums: true | false</Description>
-      <Display>always</Display>
-      <Required>false</Required>
-    </Variable>
-    <Variable>
-      <Name>SYNC_PLAYLISTS</Name>
-      <Value>true</Value>
-      <Description>Sync tracks from your Last.fm playlists: true | false</Description>
-      <Display>always</Display>
-      <Required>false</Required>
-    </Variable>
-    <Variable>
-      <Name>MUSIC_PATH</Name>
-      <Value>/mnt/user/Media/music</Value>
-      <Description>Host path to music library for volume mount</Description>
-      <Display>always</Display>
-      <Required>false</Required>
-    </Variable>
-    <Variable>
-      <Name>PORT</Name>
-      <Value>8767</Value>
-      <Description>Web UI Port</Description>
-      <Display>always</Display>
-      <Required>false</Required>
-    </Variable>
   </Environment>
 
   <Labels></Labels>
-  <Config Name="Last.fm API Key" Target="LASTFM_API_KEY" Default="" Mode="" Description="API Key from Last.fm" Type="Variable" Display="always" Required="false" Mask="true" />
-  <Config Name="Last.fm Secret" Target="LASTFM_SECRET" Default="" Mode="" Description="API Secret from Last.fm" Type="Variable" Display="always" Required="false" Mask="true" />
-  <Config Name="Last.fm Username" Target="LASTFM_USERNAME" Default="" Mode="" Description="Your Last.fm Username" Type="Variable" Display="always" Required="false" Mask="false" />
-  <Config Name="Music Output Directory" Target="MUSIC_OUTPUT_DIR" Default="/music" Mode="" Description="Container path where music is downloaded" Type="Variable" Display="always" Required="false" Mask="false" />
+  <Config Name="Config Path" Target="/app/config" Default="/mnt/user/appdata/discbox" Mode="rw" Description="Database and settings storage" Type="Path" Display="always" Required="true" Mask="false" />
+  <Config Name="Music Path" Target="/music" Default="/mnt/user/Media/music" Mode="rw" Description="Music library path for downloaded tracks" Type="Path" Display="always" Required="true" Mask="false" />
+  <Config Name="Port" Target="8767" Default="8767" Mode="tcp" Description="Web UI port" Type="Port" Display="always" Required="true" Mask="false" />
   <Config Name="Audio Format" Target="AUDIO_FORMAT" Default="mp3" Mode="" Description="Download format: mp3 | flac | opus | m4a" Type="Variable" Display="always" Required="false" Mask="false" />
   <Config Name="Audio Quality" Target="AUDIO_QUALITY" Default="320k" Mode="" Description="Audio bitrate: 128k | 192k | 256k | 320k" Type="Variable" Display="always" Required="false" Mask="false" />
   <Config Name="Max Concurrent Downloads" Target="MAX_CONCURRENT_DOWNLOADS" Default="2" Mode="" Description="Parallel downloads (1-5)" Type="Variable" Display="always" Required="false" Mask="false" />
-  <Config Name="Search Preference" Target="SEARCH_PREFERENCE" Default="auto" Mode="" Description="YouTube search mode: auto | official_audio | lyrics" Type="Variable" Display="always" Required="false" Mask="false" />
-  <Config Name="Sync Interval (minutes)" Target="SYNC_INTERVAL" Default="360" Mode="" Description="How often to sync (in minutes)" Type="Variable" Display="always" Required="false" Mask="false" />
-  <Config Name="Sync Loved Tracks" Target="SYNC_LOVED" Default="true" Mode="" Description="Enable loved tracks syncing" Type="Variable" Display="always" Required="false" Mask="false" />
-  <Config Name="Sync Albums" Target="SYNC_ALBUMS" Default="true" Mode="" Description="Enable album library syncing" Type="Variable" Display="always" Required="false" Mask="false" />
-  <Config Name="Sync Playlists" Target="SYNC_PLAYLISTS" Default="true" Mode="" Description="Enable playlist syncing" Type="Variable" Display="always" Required="false" Mask="false" />
-  <Config Name="Host Music Path" Target="MUSIC_PATH" Default="/mnt/user/music" Mode="" Description="Host path to music library" Type="Variable" Display="always" Required="false" Mask="false" />
-  <Config Name="Port" Target="PORT" Default="8767" Mode="" Description="Web UI port" Type="Variable" Display="always" Required="false" Mask="false" />
-  <Config Name="Config Path" Target="/app/config" Default="/mnt/user/appdata/discbox" Mode="rw" Description="Appdata Path" Type="Path" Display="always" Required="true" Mask="false" />
-  <Config Name="Music Path" Target="/music" Default="/mnt/user/music" Mode="rw" Description="Music Library Path (read-write for downloads)" Type="Path" Display="always" Required="true" Mask="false" />
+  <Config Name="Sync Interval (minutes)" Target="SYNC_INTERVAL" Default="360" Mode="" Description="How often to sync in minutes" Type="Variable" Display="always" Required="false" Mask="false" />
 </Container>
