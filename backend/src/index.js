@@ -101,6 +101,16 @@ async function startApp() {
       console.log('Created default settings');
     }
 
+    // A restart or crash during a download leaves rows stuck in 'downloading',
+    // and sync only ever picks up 'pending' — so they would never resume.
+    const stranded = await prisma.track.updateMany({
+      where: { status: 'downloading' },
+      data: { status: 'pending' },
+    });
+    if (stranded.count > 0) {
+      console.log(`Requeued ${stranded.count} track(s) left mid-download by the last shutdown`);
+    }
+
     // Make sure yt-dlp is current before the first sync — a stale binary makes
     // YouTube return HTTP 403 for every download while search still succeeds.
     await startYtDlpUpdater();

@@ -69,9 +69,12 @@ ENV AUDIO_QUALITY=320k
 ENV MAX_CONCURRENT_DOWNLOADS=2
 ENV SEARCH_PREFERENCE=auto
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:8767/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"
+# Health check.
+# 127.0.0.1, not localhost: the container's /etc/hosts maps localhost to ::1 as
+# well, and the server binds 0.0.0.0 (IPv4 only), so an IPv6-first resolution
+# makes the check fail with ECONNREFUSED against a perfectly healthy app.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD node -e "require('http').get('http://127.0.0.1:8767/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)}).on('error', (e) => {console.error(e.message); process.exit(1)})"
 
 # Run as root to ensure yt-dlp can write to /music directory
 # Note: The music directory is mounted from the host, and host permissions take precedence
