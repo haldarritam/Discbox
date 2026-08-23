@@ -4,6 +4,7 @@ const fs = require('fs');
 const {
   normalize,
   normalizeTitle,
+  sanitizeFilename: sanitize,
   coverage,
   primaryArtist,
   durationMatches,
@@ -19,15 +20,6 @@ const MIN_ARTIST_COVERAGE = 0.5;
 const FILENAME_MATCH_COVERAGE = 0.75;
 
 const AUDIO_EXTENSIONS = ['.mp3', '.flac', '.m4a', '.opus', '.ogg', '.aac'];
-
-/**
- * Filesystem-safe name. Kept byte-for-byte identical to the original so that
- * paths already stored in the database still resolve.
- */
-const sanitize = (str) => (str || '')
-  .replace(/[<>:"\/\\|?*]/g, '')
-  .replace(/\//g, '-')
-  .trim();
 
 class YTDLPService {
   /**
@@ -490,7 +482,7 @@ class YTDLPService {
    */
   static findDownloadedFile(outputDir, artist, title, track = {}, options = {}) {
     const { exactOnly = false } = options;
-    const normalizedTitle = normalizeTitle(title);
+    const normalizedTitle = normalizeTitle(sanitize(title));
     if (!normalizedTitle) return null; // refuse to match on an empty needle
 
     // The exact path the current naming scheme would produce, first.
@@ -535,6 +527,8 @@ class YTDLPService {
         const stem = normalizeTitle(
           path.basename(entry.name, ext).replace(/^\d{1,3}\s*-\s*/, '')
         );
+        // Compare against the sanitized title: the filename went through
+        // sanitize() on the way to disk, so "3:59 AM" is "359 AM" there.
         // Symmetric on purpose: "Alag Aasmaan" fully covers "Alag Aasmaan
         // (Acoustic)" in one direction, and those are different recordings.
         if (coverage(normalizedTitle, stem) >= FILENAME_MATCH_COVERAGE

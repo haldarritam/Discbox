@@ -86,6 +86,20 @@ function coverage(needle, haystack) {
   return hits / needleTokens.length;
 }
 
+/**
+ * Filesystem-safe name, byte-for-byte what the downloader has always written,
+ * so paths already stored in the database still resolve.
+ *
+ * Note it DROPS characters rather than replacing them: "3:59 AM" is stored as
+ * "359 AM", "cold/mess" as "coldmess". Anything comparing a title against a
+ * filename on disk has to sanitize the title the same way first, or those
+ * perfectly good files look like mismatches.
+ */
+const sanitizeFilename = (str) => (str || '')
+  .replace(/[<>:"\/\\|?*]/g, '')
+  .replace(/\//g, '-')
+  .trim();
+
 /** Primary artist only — "Pritam, Atif Aslam" and "Pritam feat. X" both -> "pritam". */
 function primaryArtist(artist) {
   return (artist || '')
@@ -135,6 +149,7 @@ module.exports = {
   VARIANT_MARKERS,
   normalize,
   normalizeTitle,
+  sanitizeFilename,
   tokens,
   coverage,
   primaryArtist,

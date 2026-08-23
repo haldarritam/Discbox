@@ -31,7 +31,7 @@ const { PrismaClient } = require('@prisma/client');
 const SRC = fs.existsSync(path.join(__dirname, '../backend/src/services/matching.js'))
   ? path.join(__dirname, '../backend/src/services')
   : '/app/src/services';
-const { normalizeTitle, coverage, durationMatches } = require(path.join(SRC, 'matching'));
+const { normalizeTitle, sanitizeFilename, coverage, durationMatches } = require(path.join(SRC, 'matching'));
 const YTDLPService = require(path.join(SRC, 'ytdlp'));
 
 const prisma = new PrismaClient();
@@ -54,12 +54,18 @@ function deleteFileAndEmptyParents(filePath) {
   }
 }
 
-/** Filename (minus any "07 - " prefix) has to actually carry the track title. */
+/**
+ * Filename (minus any "07 - " prefix) has to actually carry the track title.
+ *
+ * The title is sanitized first, because that is what the downloader wrote to
+ * disk: "3:59 AM" is stored as "359 AM.mp3" and "cold/mess" as "coldmess.mp3".
+ * Comparing the raw title flags those correct files as mismatches.
+ */
 function filenameMatchesTitle(filePath, title) {
   const stem = path
     .basename(filePath, path.extname(filePath))
     .replace(/^\d{1,3}\s*-\s*/, '');
-  const wanted = normalizeTitle(title);
+  const wanted = normalizeTitle(sanitizeFilename(title));
   if (!wanted) return false;
   return coverage(wanted, normalizeTitle(stem)) >= 0.6;
 }
@@ -78,8 +84,9 @@ async function main() {
 
   const broken = [];
   const reasons = {};
-  // Files safe to delete: the repaired track is the only claimant, so nothing
-  // else in the library depends on them.
+  // Files safe to delete: the repaired track is the only claimant AND the file
+  // carries its name, so it is this track's own bad download and nothing else
+  // in the library depends on it.
   const deletable = new Set();
   const note = (track, reason, detail = '', canDelete = false) => {
     broken.push(track);
@@ -110,11 +117,17 @@ async function main() {
       }
     }
 
-    // Sole claimant from here on, so the file is this track's to delete.
+    // Not deleted: the filename says this file was written for a DIFFERENT
+    // track (often one whose own row lost its file_path). Dropping the bogus
+    // claim is enough; sweeping genuinely orphaned audio is
+    // cleanup-orphaned-files.js's job.
     if (!filenameMatchesTitle(track.file_path, track.title)) {
-      note(track, 'filename-mismatch', '', true);
+      note(track, 'filename-mismatch');
       continue;
     }
+
+    // Sole claimant, and the filename is this track's own, so anything wrong
+    // with the contents makes the file this track's to delete.
 
     if (CHECK_DURATION && track.duration) {
       const actual = await YTDLPService.probeDuration(track.file_path);
