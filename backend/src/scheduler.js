@@ -26,6 +26,41 @@ const MAX_CANDIDATES_PER_TRACK = 3;
  * @param {string} raw
  * @returns {string}
  */
+/**
+ * Update a track, tolerating the row having been deleted since the run started.
+ *
+ * A sync holds its pending list in memory for the whole run, so anything that
+ * removes rows in the meantime (reconcile-likes, a purge from the UI) leaves
+ * ids that no longer exist. Prisma throws P2025 for those, and an unhandled
+ * throw here used to abort the entire sync — one stale id stopped hundreds of
+ * legitimate downloads.
+ *
+ * @returns {Promise<Object|null>} the updated row, or null if it is gone
+ */
+/**
+ * The key a track is deduplicated by: primary artist + title, lowercased.
+ *
+ * Collection and insertion MUST agree on this. They used to disagree — tracks
+ * were collapsed by primary artist, but the "do we already have this?" lookup
+ * compared the full artist string. So "Pritam, Atif Aslam - Song" was inserted
+ * alongside an existing "Pritam - Song", and every sync minted more duplicate
+ * rows for the same song.
+ */
+const trackKey = (artist, title) =>
+  `${primaryArtist(artist).toLowerCase()}\u0000${(title || '').toLowerCase()}`;
+
+async function safeTrackUpdate(id, data) {
+  try {
+    return await prisma.track.update({ where: { id }, data });
+  } catch (err) {
+    if (err.code === 'P2025') {
+      console.log(`[scheduler] Track ${id} no longer exists, skipping`);
+      return null;
+    }
+    throw err;
+  }
+}
+
 function cleanError(raw) {
   const lines = (raw || '').split('\n').map((l) => l.trim()).filter(Boolean);
   const errors = lines.filter((l) => /^ERROR/i.test(l));
@@ -244,7 +279,7 @@ class SyncScheduler {
       // e.g. "Pritam, Atif Aslam" and "Pritam" both normalize to "pritam"
       const dedupeMap = new Map();
       for (const track of collectedTracks) {
-        const key = `${primaryArtist(track.artist).toLowerCase()}|${track.title.toLowerCase()}`;
+        const key = trackKey(track.artist, track.title);
         const existing = dedupeMap.get(key);
 
         if (!existing) {
@@ -265,24 +300,24 @@ class SyncScheduler {
 
       // Step 5: Insert new tracks into database
       //
-      // One indexed read of (artist, title, status, source, id) instead of a
-      // findUnique per collected track — this loop used to fire ~6500 separate
-      // SQLite queries on every sync.
+      // One indexed read instead of a findUnique per collected track — this
+      // loop used to fire ~6500 separate SQLite queries on every sync. Keyed by
+      // trackKey so the existence check matches how collection deduplicated.
       const knownTracks = new Map(
         (await prisma.track.findMany({
           select: { id: true, artist: true, title: true, status: true, source: true },
-        })).map((t) => [`${t.artist}\u0000${t.title}`, t])
+        })).map((t) => [trackKey(t.artist, t.title), t])
       );
 
       let tracksAdded = 0;
       for (const track of deduplicatedTracks) {
         try {
-          const existing = knownTracks.get(`${track.artist}\u0000${track.title}`);
+          const existing = knownTracks.get(trackKey(track.artist, track.title));
 
           if (existing?.status === 'blocked') {
             // Track is blocked — skip re-adding
           } else if (!existing) {
-            await prisma.track.create({
+            const created = await prisma.track.create({
               data: {
                 artist: track.artist,
                 title: track.title,
@@ -305,6 +340,7 @@ class SyncScheduler {
                 account_label: track.account_label || null,
               },
             });
+            knownTracks.set(trackKey(track.artist, track.title), created);
             tracksAdded++;
           } else if (
             existing.source !== 'loved' &&
@@ -353,11 +389,18 @@ class SyncScheduler {
           Math.min(i + maxConcurrent, pendingTracks.length)
         );
 
-        await Promise.all(
+        // allSettled, not all: a track that throws for an unforeseen reason
+        // must not abort the rest of the run.
+        const results = await Promise.allSettled(
           batch.map((track) =>
             this.processTrackDownload(track, settings, syncStats)
           )
         );
+        for (const result of results) {
+          if (result.status === 'rejected') {
+            console.error('Unhandled track error:', result.reason?.message || result.reason);
+          }
+        }
       }
 
       // Step 7: Create sync log
@@ -442,14 +485,12 @@ class SyncScheduler {
 
     const markFailed = async (error) => {
       const message = cleanError(error);
-      await prisma.track.update({
-        where: { id: track.id },
-        data: {
-          status: 'failed',
-          download_error: message,
-          retry_count: (track.retry_count || 0) + 1,
-        },
+      const updated = await safeTrackUpdate(track.id, {
+        status: 'failed',
+        download_error: message,
+        retry_count: (track.retry_count || 0) + 1,
       });
+      if (!updated) return;
       bump('tracksFailed');
       console.error(`Download failed for "${track.artist}" - "${track.title}": ${message}`);
       this.emitEvent({
@@ -473,15 +514,13 @@ class SyncScheduler {
         const existingDuration = await YTDLPService.probeDuration(alreadyThere);
         if (durationMatches(existingDuration, track.duration)) {
           console.log(`[scheduler] Already on disk, skipping download: ${alreadyThere}`);
-          await prisma.track.update({
-            where: { id: track.id },
-            data: {
-              status: 'downloaded',
-              file_path: alreadyThere,
-              download_error: null,
-              downloaded_at: track.downloaded_at || new Date(),
-            },
+          const updated = await safeTrackUpdate(track.id, {
+            status: 'downloaded',
+            file_path: alreadyThere,
+            download_error: null,
+            downloaded_at: track.downloaded_at || new Date(),
           });
+          if (!updated) return;
           bump('tracksDownloaded');
           this.emitEvent({
             type: 'track_downloaded',
@@ -528,14 +567,12 @@ class SyncScheduler {
           `${candidate.title} (${candidate.duration || '?'}s, score ${candidate.score})`
         );
 
-        await prisma.track.update({
-          where: { id: track.id },
-          data: {
-            youtube_url: candidate.url,
-            youtube_video_id: candidate.videoId,
-            status: 'downloading',
-          },
+        const claimed = await safeTrackUpdate(track.id, {
+          youtube_url: candidate.url,
+          youtube_video_id: candidate.videoId,
+          status: 'downloading',
         });
+        if (!claimed) return;   // deleted while we were queued
 
         this.emitEvent({
           type: 'track_downloading',
@@ -572,15 +609,12 @@ class SyncScheduler {
         if (downloadResult.success) {
           await YTDLPService.tagFile(downloadResult.filePath, track);
 
-          await prisma.track.update({
-            where: { id: track.id },
-            data: {
-              status: 'downloaded',
-              file_path: downloadResult.filePath,
-              download_error: null,
-              retry_count: 0,
-              downloaded_at: new Date(),
-            },
+          await safeTrackUpdate(track.id, {
+            status: 'downloaded',
+            file_path: downloadResult.filePath,
+            download_error: null,
+            retry_count: 0,
+            downloaded_at: new Date(),
           });
           bump('tracksDownloaded');
 
@@ -612,14 +646,11 @@ class SyncScheduler {
         if (premiereMatch) {
           const hoursUntil = parseInt(premiereMatch[1], 10) + 1;
           const retryAt = new Date(Date.now() + hoursUntil * 60 * 60 * 1000);
-          await prisma.track.update({
-            where: { id: track.id },
-            data: {
-              status: 'pending',
-              download_error: `Premiere — auto-retry after ${retryAt.toISOString()}`,
-              retry_count: 0,
-              requested_at: retryAt,
-            },
+          await safeTrackUpdate(track.id, {
+            status: 'pending',
+            download_error: `Premiere — auto-retry after ${retryAt.toISOString()}`,
+            retry_count: 0,
+            requested_at: retryAt,
           });
           console.log(
             `[scheduler] Premiere detected for "${track.artist}" - "${track.title}", retrying in ${hoursUntil}h`
@@ -634,7 +665,11 @@ class SyncScheduler {
       await markFailed(lastError);
     } catch (error) {
       console.error(`Error processing track ${track.id}:`, error.message);
-      await markFailed(error.message);
+      try {
+        await markFailed(error.message);
+      } catch (markError) {
+        console.error(`Could not record failure for track ${track.id}:`, markError.message);
+      }
     }
   }
 }
@@ -681,14 +716,11 @@ async function runFileScanner() {
 
     const requeue = async (track, reason) => {
       console.warn(`[scanner] ${reason} for "${track.artist}" - "${track.title}" (${track.file_path || 'no path'})`);
-      await prisma.track.update({
-        where: { id: track.id },
-        data: {
-          status: 'pending',
-          file_path: null,
-          download_error: null,
-          retry_count: 0,
-        },
+      await safeTrackUpdate(track.id, {
+        status: 'pending',
+        file_path: null,
+        download_error: null,
+        retry_count: 0,
       });
     };
 
@@ -719,10 +751,7 @@ async function runFileScanner() {
         filesVerified++;
         console.log(`[scanner] Updated path for "${track.artist}" - "${track.title}": ${foundFile}`);
         claimedPaths.set(foundFile, [track]);
-        await prisma.track.update({
-          where: { id: track.id },
-          data: { file_path: foundFile },
-        });
+        await safeTrackUpdate(track.id, { file_path: foundFile });
       } else {
         filesNotFound++;
         await requeue(track, 'File not found');
@@ -749,12 +778,9 @@ async function runFileScanner() {
 
       if (retryCount < maxRetries) {
         // Queue for retry
-        await prisma.track.update({
-          where: { id: track.id },
-          data: {
-            status: 'pending',
-            retry_count: retryCount + 1,
-          },
+        await safeTrackUpdate(track.id, {
+          status: 'pending',
+          retry_count: retryCount + 1,
         });
         retriesQueued++;
         console.log(`[scanner] Queued retry ${retryCount + 1}/${maxRetries} for "${track.artist}" - "${track.title}"`);
@@ -763,10 +789,7 @@ async function runFileScanner() {
         retriesExhausted++;
         if (!(track.download_error || '').startsWith('Failed after')) {
           const finalError = `Failed after ${maxRetries} retry attempts. ${track.download_error || 'Unknown error'}`;
-          await prisma.track.update({
-            where: { id: track.id },
-            data: { download_error: finalError },
-          });
+          await safeTrackUpdate(track.id, { download_error: finalError });
           console.log(`[scanner] Retries exhausted for "${track.artist}" - "${track.title}"`);
         }
       }
