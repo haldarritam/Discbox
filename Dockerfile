@@ -1,4 +1,4 @@
-# Multi-stage Dockerfile for LikedFM
+# Multi-stage Dockerfile for Discbox
 # Stage 1: Build frontend
 FROM node:18-alpine AS frontend-build
 
@@ -16,7 +16,12 @@ FROM node:18-alpine
 # Install dumb-init, libssl for Prisma, ffmpeg, python3 for yt-dlp, deno for JS runtime, and yt-dlp itself
 RUN apk add --no-cache dumb-init openssl ffmpeg python3 py3-pip curl deno
 
-# Install yt-dlp
+# Install yt-dlp.
+# NOTE: this only pins the build-time version. YouTube breaks older yt-dlp
+# builds every few months (every download starts returning HTTP 403 Forbidden
+# while search keeps working), so the app self-updates the binary at startup and
+# once a day — see startYtDlpUpdater() in src/scheduler.js. That needs the
+# binary to stay writable, hence /usr/local/bin rather than a package install.
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
     -o /usr/local/bin/yt-dlp && \
     chmod +x /usr/local/bin/yt-dlp && \
@@ -42,6 +47,9 @@ RUN npx prisma generate
 
 # Copy backend source
 COPY backend/src ./src
+
+# Maintenance scripts, runnable with: docker exec <container> node scripts/<name>.js
+COPY scripts ./scripts
 
 # Copy built frontend from previous stage
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist

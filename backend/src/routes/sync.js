@@ -11,6 +11,10 @@ function setSyncService(service) {
   syncService = service;
 }
 
+function getSyncService() {
+  return syncService;
+}
+
 /**
  * POST /api/sync
  * Trigger a manual sync now
@@ -139,19 +143,29 @@ router.post('/tracks/:id/download', async (req, res) => {
  */
 router.post('/retry-failed', async (req, res) => {
   try {
-    // Step 1: Clear all failed tracks in DB immediately
-    const updated = await prisma.track.updateMany({
+    // Step 1: Clear all failed tracks in DB immediately.
+    // retry_count is reset too — an explicit user retry should get a full set of
+    // attempts, otherwise tracks that already hit max_retries fail again at once.
+    const failedIds = (await prisma.track.findMany({
       where: { status: 'failed' },
+      select: { id: true },
+    })).map((t) => t.id);
+
+    const updated = await prisma.track.updateMany({
+      where: { id: { in: failedIds } },
       data: {
         status: 'pending',
         download_error: null,
+        retry_count: 0,
       },
     });
 
-    // Step 2: Emit SSE for each cleared track
+    // Step 2: Emit SSE for each cleared track.
+    // (Was filtered to source in loved/album/playlist, which silently skipped
+    // every Deezer track — deezer_loved / deezer_album / deezer_playlist.)
     const { broadcastEvent } = require('./events');
     const clearedTracks = await prisma.track.findMany({
-      where: { status: 'pending', source: { in: ['loved', 'album', 'playlist'] } },
+      where: { id: { in: failedIds } },
     });
 
     clearedTracks.forEach((track) => {
@@ -209,4 +223,5 @@ router.post('/file-scan', async (req, res) => {
 
 module.exports = router;
 module.exports.setSyncService = setSyncService;
+module.exports.getSyncService = getSyncService;
 

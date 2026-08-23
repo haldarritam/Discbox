@@ -21,7 +21,7 @@ const statsRouter = require('./routes/stats');
 const eventsRouter = require('./routes/events');
 const bookmarksRouter = require('./routes/bookmarks');
 const deezerRouter = require('./routes/deezer');
-const { startFileScanner } = require('./scheduler');
+const { startFileScanner, startYtDlpUpdater } = require('./scheduler');
 
 // Set sync service for the sync route
 const { setSyncService } = require('./routes/sync');
@@ -100,6 +100,10 @@ async function startApp() {
       });
       console.log('Created default settings');
     }
+
+    // Make sure yt-dlp is current before the first sync — a stale binary makes
+    // YouTube return HTTP 403 for every download while search still succeeds.
+    await startYtDlpUpdater();
 
     // Start scheduler
     await scheduler.start();

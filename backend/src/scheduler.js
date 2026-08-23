@@ -1,14 +1,37 @@
-const cron = require('node-cron');
 const fs = require('fs');
 const { PrismaClient } = require('@prisma/client');
 const LastFMService = require('./services/lastfm');
 const YTDLPService = require('./services/ytdlp');
 const DeezerService = require('./services/deezer');
+const { primaryArtist, durationMatches } = require('./services/matching');
 
 const prisma = new PrismaClient();
 
 // File scanner globals
-let scannerJob = null;
+let scannerTimer = null;
+let ytdlpUpdateTimer = null;
+
+const MINUTE_MS = 60 * 1000;
+
+/**
+ * How many search results to try before giving up on a track. If the top hit
+ * turns out to be the wrong length once downloaded, we fall through to the next.
+ */
+const MAX_CANDIDATES_PER_TRACK = 3;
+
+/**
+ * yt-dlp writes multi-line WARNINGs (stale-version notices, SABR notices) to
+ * stderr alongside the real error. Keep only the lines that explain the failure
+ * so download_error stays readable in the UI.
+ * @param {string} raw
+ * @returns {string}
+ */
+function cleanError(raw) {
+  const lines = (raw || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const errors = lines.filter((l) => /^ERROR/i.test(l));
+  const text = (errors.length ? errors : lines.filter((l) => !/^WARNING/i.test(l) && !/^\s*(It is strongly|Run "yt-dlp|To suppress)/i.test(l)));
+  return (text.length ? text : lines).join(' ').slice(0, 500);
+}
 
 class SyncScheduler {
   constructor() {
@@ -36,7 +59,7 @@ class SyncScheduler {
   /**
    * Start the sync scheduler
    */
-  async start() {
+  async start({ runInitialSync = true } = {}) {
     try {
       const settings = await prisma.settings.findUnique({
         where: { id: 1 },
@@ -49,10 +72,14 @@ class SyncScheduler {
 
       const interval = settings.sync_interval || 360; // Default 6 hours
 
-      // Schedule sync at specified interval
-      this.scheduledTask = cron.schedule(`*/${interval} * * * *`, async () => {
-        await this.sync();
-      });
+      // A plain interval timer, not cron. The old `*/${interval} * * * *` is only
+      // a valid cron expression while interval < 60 — at the default of 360
+      // minutes node-cron reduced it to "every hour", so the app synced 6x more
+      // often than configured (and hammered the Deezer API doing it).
+      if (this.scheduledTask) clearInterval(this.scheduledTask);
+      this.scheduledTask = setInterval(() => {
+        this.sync().catch((err) => console.error('Scheduled sync error:', err));
+      }, interval * MINUTE_MS);
 
       console.log(`Scheduler: Started, sync every ${interval} minutes`);
       this.emitEvent({
@@ -61,8 +88,11 @@ class SyncScheduler {
         timestamp: new Date(),
       });
 
-      // Run initial sync
-      setTimeout(() => this.sync(), 5000);
+      // Run initial sync (skipped when we're just re-arming the timer after a
+      // settings change — a full Deezer re-fetch on every save is wasteful).
+      if (runInitialSync) {
+        setTimeout(() => this.sync(), 5000);
+      }
     } catch (error) {
       console.error('Scheduler start error:', error);
     }
@@ -73,7 +103,8 @@ class SyncScheduler {
    */
   stop() {
     if (this.scheduledTask) {
-      this.scheduledTask.stop();
+      clearInterval(this.scheduledTask);
+      this.scheduledTask = null;
       console.log('Scheduler: Stopped');
       this.emitEvent({
         type: 'scheduler_stopped',
@@ -211,14 +242,9 @@ class SyncScheduler {
       // Step 4: Deduplicate tracks by (primary artist + title), keep "loved" source as priority
       // Primary artist = first artist before any comma/feat/& to handle multi-artist differences
       // e.g. "Pritam, Atif Aslam" and "Pritam" both normalize to "pritam"
-      const primaryArtist = (artist) => artist
-        .toLowerCase()
-        .split(/,|feat\.|ft\.|&/)[0]
-        .trim();
-
       const dedupeMap = new Map();
       for (const track of collectedTracks) {
-        const key = `${primaryArtist(track.artist)}|${track.title.toLowerCase()}`;
+        const key = `${primaryArtist(track.artist).toLowerCase()}|${track.title.toLowerCase()}`;
         const existing = dedupeMap.get(key);
 
         if (!existing) {
@@ -238,17 +264,20 @@ class SyncScheduler {
       );
 
       // Step 5: Insert new tracks into database
+      //
+      // One indexed read of (artist, title, status, source, id) instead of a
+      // findUnique per collected track — this loop used to fire ~6500 separate
+      // SQLite queries on every sync.
+      const knownTracks = new Map(
+        (await prisma.track.findMany({
+          select: { id: true, artist: true, title: true, status: true, source: true },
+        })).map((t) => [`${t.artist}\u0000${t.title}`, t])
+      );
+
       let tracksAdded = 0;
       for (const track of deduplicatedTracks) {
         try {
-          const existing = await prisma.track.findUnique({
-            where: {
-              artist_title: {
-                artist: track.artist,
-                title: track.title,
-              },
-            },
-          });
+          const existing = knownTracks.get(`${track.artist}\u0000${track.title}`);
 
           if (existing?.status === 'blocked') {
             // Track is blocked — skip re-adding
@@ -363,232 +392,261 @@ class SyncScheduler {
   }
 
   /**
+   * Pick a YouTube source for a track.
+   *
+   * A URL the user supplied by hand always wins — the whole point of pasting a
+   * link is to override the search. The old code stored `youtube_url` on manual
+   * adds and then ignored it, running its own search and downloading whatever
+   * that returned, which is why hand-added tracks came back as the wrong (or a
+   * truncated) recording.
+   *
+   * @param {Object} track
+   * @param {Object} settings
+   * @returns {Promise<{candidates: Array, manual: boolean}>}
+   */
+  async resolveCandidates(track, settings) {
+    if (track.account_label === 'manual' && track.youtube_url) {
+      console.log(`[scheduler] Using user-supplied URL for "${track.artist}" - "${track.title}"`);
+      return {
+        manual: true,
+        candidates: [{
+          url: track.youtube_url,
+          videoId: track.youtube_video_id || null,
+          title: track.title,
+          duration: track.duration || null,
+          score: Infinity,
+        }],
+      };
+    }
+
+    console.log(
+      `Downloading: Searching YouTube for "${track.artist}" - "${track.title}"` +
+      (track.duration ? ` (~${track.duration}s)` : '')
+    );
+
+    const candidates = await YTDLPService.searchCandidates(track.artist, track.title, {
+      preference: settings.search_preference || 'auto',
+      expectedDuration: track.duration || null,
+    });
+
+    return { manual: false, candidates };
+  }
+
+  /**
    * Process a single track download
    */
   async processTrackDownload(track, settings, syncStats) {
-    try {
-      // Step 1: Search YouTube
-      console.log(
-        `Downloading: Searching YouTube for "${track.artist}" - "${track.title}"`
-      );
+    const bump = (key) => {
+      if (syncStats && typeof syncStats[key] === 'number') syncStats[key]++;
+    };
 
-      const result = await YTDLPService.searchYouTube(
-        track.artist,
-        track.title,
-        settings.search_preference || 'auto'
-      );
-
-      if (!result) {
-        console.warn(
-          `Download: No YouTube result found for "${track.artist}" - "${track.title}"`
-        );
-        await prisma.track.update({
-          where: { id: track.id },
-          data: {
-            status: 'failed',
-            download_error: 'No YouTube result found',
-          },
-        });
-        syncStats.tracksFailed++;
-
-        this.emitEvent({
-          type: 'track_failed',
-          trackId: track.id,
-          error: 'No YouTube result found',
-          timestamp: new Date(),
-        });
-        return;
-      }
-
-      // Step 2: Update with YouTube metadata
+    const markFailed = async (error) => {
+      const message = cleanError(error);
       await prisma.track.update({
         where: { id: track.id },
         data: {
-          youtube_url: result.url,
-          youtube_video_id: result.videoId,
-          status: 'downloading',
+          status: 'failed',
+          download_error: message,
+          retry_count: (track.retry_count || 0) + 1,
         },
       });
-
+      bump('tracksFailed');
+      console.error(`Download failed for "${track.artist}" - "${track.title}": ${message}`);
       this.emitEvent({
-        type: 'track_downloading',
+        type: 'track_failed',
         trackId: track.id,
+        error: message,
         timestamp: new Date(),
       });
+    };
 
-      // Step 3: Sanitize artist and title before download
-      // Replace "NA" or empty/null values with fallbacks
-      const safeArtist = (track.artist && track.artist !== 'NA' && track.artist.trim())
-        ? track.artist.trim()
-        : 'Unknown Artist';
+    try {
+      const outputDir = settings.music_output_dir || '/music';
 
-      const safeTitle = (track.title && track.title !== 'NA' && track.title.trim())
-        ? track.title.trim()
-        : 'Unknown Title';
-
-      console.log(
-        `[scheduler] Using sanitized names: ${safeArtist} - ${safeTitle}`
+      // If a good file is already on disk for this track, don't re-download it.
+      // Exact path only — a fuzzy filename match here could adopt a sibling
+      // recording ("Alag Aasmaan" vs "Alag Aasmaan (Acoustic)").
+      const alreadyThere = YTDLPService.findDownloadedFile(
+        outputDir, track.artist, track.title, track, { exactOnly: true }
       );
-
-      // Step 4: Download track
-      const downloadResult = await YTDLPService.downloadTrack(
-        result.url,
-        safeArtist,
-        safeTitle,
-        {
-          format: settings.audio_format || 'mp3',
-          quality: settings.audio_quality || '320k',
-          outputDir: settings.music_output_dir || '/music',
-          track,
-          onProgress: (progress) => {
-            this.emitEvent({
-              type: 'download_progress',
-              trackId: track.id,
-              percent: progress.percent,
-              speed: progress.speed,
-              eta: progress.eta,
-              timestamp: new Date(),
-            });
-          },
-        }
-      );
-
-      if (downloadResult.success) {
-        // Tag the file with all available metadata
-        if (downloadResult.filePath) {
-          await YTDLPService.tagFile(downloadResult.filePath, track);
-        }
-
-        await prisma.track.update({
-          where: { id: track.id },
-          data: {
-            status: 'downloaded',
-            file_path: downloadResult.filePath,
-            downloaded_at: new Date(),
-          },
-        });
-        syncStats.tracksDownloaded++;
-
-        console.log(
-          `Download: Successfully downloaded "${track.artist}" - "${track.title}"`
-        );
-
-        this.emitEvent({
-          type: 'track_downloaded',
-          trackId: track.id,
-          status: 'downloaded',
-          filePath: downloadResult.filePath,
-          download_error: null,
-          timestamp: new Date(),
-        });
-      } else {
-        // Before marking as failed, do one more file existence check
-        // in case yt-dlp downloaded but reported an error
-        const outputDir = settings.music_output_dir || '/music';
-        const existingFile = YTDLPService.findDownloadedFile(
-          outputDir,
-          track.artist,
-          track.title
-        );
-        
-        if (existingFile) {
-          console.log(
-            `[scheduler] File found despite yt-dlp error — marking as downloaded: ${existingFile}`
-          );
+      if (alreadyThere) {
+        const existingDuration = await YTDLPService.probeDuration(alreadyThere);
+        if (durationMatches(existingDuration, track.duration)) {
+          console.log(`[scheduler] Already on disk, skipping download: ${alreadyThere}`);
           await prisma.track.update({
             where: { id: track.id },
             data: {
               status: 'downloaded',
-              file_path: existingFile,
+              file_path: alreadyThere,
               download_error: null,
+              downloaded_at: track.downloaded_at || new Date(),
+            },
+          });
+          bump('tracksDownloaded');
+          this.emitEvent({
+            type: 'track_downloaded',
+            trackId: track.id,
+            status: 'downloaded',
+            filePath: alreadyThere,
+            download_error: null,
+            timestamp: new Date(),
+          });
+          return;
+        }
+      }
+
+      // Step 1: Find sources to try
+      const { candidates, manual } = await this.resolveCandidates(track, settings);
+
+      if (candidates.length === 0) {
+        const reason = track.duration
+          ? `No YouTube result matching "${track.title}" at ~${track.duration}s`
+          : 'No YouTube result found';
+        console.warn(`Download: ${reason} for "${track.artist}" - "${track.title}"`);
+        await markFailed(reason);
+        return;
+      }
+
+      // Step 2: Sanitize artist and title before download
+      const safeArtist = (track.artist && track.artist !== 'NA' && track.artist.trim())
+        ? track.artist.trim()
+        : 'Unknown Artist';
+      const safeTitle = (track.title && track.title !== 'NA' && track.title.trim())
+        ? track.title.trim()
+        : 'Unknown Title';
+
+      // Step 3: Try candidates best-first. A candidate that downloads to the
+      // wrong length is discarded and we fall through to the next one.
+      const attempts = manual
+        ? candidates
+        : candidates.slice(0, MAX_CANDIDATES_PER_TRACK);
+      let lastError = 'All candidates rejected';
+
+      for (const [index, candidate] of attempts.entries()) {
+        console.log(
+          `[scheduler] Candidate ${index + 1}/${attempts.length} for "${track.artist}" - "${track.title}": ` +
+          `${candidate.title} (${candidate.duration || '?'}s, score ${candidate.score})`
+        );
+
+        await prisma.track.update({
+          where: { id: track.id },
+          data: {
+            youtube_url: candidate.url,
+            youtube_video_id: candidate.videoId,
+            status: 'downloading',
+          },
+        });
+
+        this.emitEvent({
+          type: 'track_downloading',
+          trackId: track.id,
+          timestamp: new Date(),
+        });
+
+        const downloadResult = await YTDLPService.downloadTrack(
+          candidate.url,
+          safeArtist,
+          safeTitle,
+          {
+            format: settings.audio_format || 'mp3',
+            quality: settings.audio_quality || '320k',
+            outputDir,
+            track,
+            // A hand-picked URL is trusted as-is; only searched results are
+            // held to the source's runtime.
+            expectedDuration: manual ? null : (track.duration || null),
+            durationSlack: candidate.relaxed ? 0.25 : null,
+            onProgress: (progress) => {
+              this.emitEvent({
+                type: 'download_progress',
+                trackId: track.id,
+                percent: progress.percent,
+                speed: progress.speed,
+                eta: progress.eta,
+                timestamp: new Date(),
+              });
+            },
+          }
+        );
+
+        if (downloadResult.success) {
+          await YTDLPService.tagFile(downloadResult.filePath, track);
+
+          await prisma.track.update({
+            where: { id: track.id },
+            data: {
+              status: 'downloaded',
+              file_path: downloadResult.filePath,
+              download_error: null,
+              retry_count: 0,
               downloaded_at: new Date(),
             },
           });
-          syncStats.tracksDownloaded++;
+          bump('tracksDownloaded');
+
+          console.log(
+            `Download: Successfully downloaded "${track.artist}" - "${track.title}" ` +
+            `-> ${downloadResult.filePath}`
+          );
 
           this.emitEvent({
             type: 'track_downloaded',
             trackId: track.id,
             status: 'downloaded',
-            filePath: existingFile,
+            filePath: downloadResult.filePath,
             download_error: null,
             timestamp: new Date(),
           });
-        } else {
-          const retryCount = (track.retry_count || 0) + 1;
-          const errMsg = downloadResult.error || '';
-
-          // Detect YouTube premiere — reset to pending after the wait time
-          const premiereMatch = errMsg.match(/Premieres in (\d+) hours?/i);
-          if (premiereMatch) {
-            const hoursUntil = parseInt(premiereMatch[1]) + 1;
-            const retryAt = new Date(Date.now() + hoursUntil * 60 * 60 * 1000);
-            await prisma.track.update({
-              where: { id: track.id },
-              data: {
-                status: 'pending',
-                download_error: `Premiere — auto-retry after ${retryAt.toISOString()}`,
-                retry_count: 0,
-                requested_at: retryAt,
-              },
-            });
-            console.log(`[scheduler] Premiere detected for "${track.artist}" - "${track.title}", will retry in ${hoursUntil}h`);
-          } else {
-            await prisma.track.update({
-              where: { id: track.id },
-              data: {
-                status: 'failed',
-                download_error: errMsg,
-                retry_count: retryCount,
-              },
-            });
-            syncStats.tracksFailed++;
-
-            console.error(
-              `Download failed for "${track.artist}" - "${track.title}" (attempt ${retryCount}):`,
-              errMsg
-            );
-
-            this.emitEvent({
-              type: 'track_failed',
-              trackId: track.id,
-              error: errMsg,
-              timestamp: new Date(),
-            });
-          }
+          return;
         }
+
+        lastError = downloadResult.error || 'Unknown download error';
+
+        if (downloadResult.durationMismatch) {
+          console.warn(`[scheduler] Rejected candidate: ${lastError}`);
+          continue; // try the next search result
+        }
+
+        // A YouTube premiere isn't a failure — it just hasn't aired yet.
+        const premiereMatch = lastError.match(/Premieres in (\d+) hours?/i);
+        if (premiereMatch) {
+          const hoursUntil = parseInt(premiereMatch[1], 10) + 1;
+          const retryAt = new Date(Date.now() + hoursUntil * 60 * 60 * 1000);
+          await prisma.track.update({
+            where: { id: track.id },
+            data: {
+              status: 'pending',
+              download_error: `Premiere — auto-retry after ${retryAt.toISOString()}`,
+              retry_count: 0,
+              requested_at: retryAt,
+            },
+          });
+          console.log(
+            `[scheduler] Premiere detected for "${track.artist}" - "${track.title}", retrying in ${hoursUntil}h`
+          );
+          return;
+        }
+
+        // Unavailable/age-gated/blocked video — the next candidate may work.
+        console.warn(`[scheduler] Candidate failed: ${cleanError(lastError)}`);
       }
+
+      await markFailed(lastError);
     } catch (error) {
       console.error(`Error processing track ${track.id}:`, error.message);
-      const retryCount = (track.retry_count || 0) + 1;
-      await prisma.track.update({
-        where: { id: track.id },
-        data: {
-          status: 'failed',
-          download_error: error.message,
-          retry_count: retryCount,
-        },
-      });
-      syncStats.tracksFailed++;
-
-      this.emitEvent({
-        type: 'track_failed',
-        trackId: track.id,
-        error: error.message,
-        timestamp: new Date(),
-      });
+      await markFailed(error.message);
     }
   }
 }
 
 /**
- * File scanner - scans music output directory for already-downloaded tracks
- * Also retries failed downloads if file is missing
+ * File scanner — verifies that every "downloaded" track really has its own file
+ * on disk, and re-queues failed tracks that still have retries left.
  */
 async function runFileScanner() {
   try {
     console.log('[scanner] Starting file scan...');
-    
+
     const settings = await prisma.settings.findUnique({
       where: { id: 1 },
     });
@@ -608,43 +666,73 @@ async function runFileScanner() {
 
     console.log(`[scanner] Checking ${downloadedTracks.length} downloaded tracks...`);
 
+    // Two tracks must never claim the same file. When they do, the later claim
+    // is a bad match, not a real download.
+    const claimedPaths = new Map();
+    for (const track of downloadedTracks) {
+      if (!track.file_path) continue;
+      if (!claimedPaths.has(track.file_path)) claimedPaths.set(track.file_path, []);
+      claimedPaths.get(track.file_path).push(track);
+    }
+
     let filesVerified = 0;
     let filesNotFound = 0;
+    let duplicateClaims = 0;
+
+    const requeue = async (track, reason) => {
+      console.warn(`[scanner] ${reason} for "${track.artist}" - "${track.title}" (${track.file_path || 'no path'})`);
+      await prisma.track.update({
+        where: { id: track.id },
+        data: {
+          status: 'pending',
+          file_path: null,
+          download_error: null,
+          retry_count: 0,
+        },
+      });
+    };
 
     for (const track of downloadedTracks) {
+      const sharers = track.file_path ? claimedPaths.get(track.file_path) : null;
+      if (sharers && sharers.length > 1) {
+        // Keep the oldest claim (the track that actually triggered the
+        // download); everything else pointed here through a bad fuzzy match.
+        const owner = sharers.reduce((a, b) => (a.id <= b.id ? a : b));
+        if (track.id !== owner.id) {
+          duplicateClaims++;
+          await requeue(track, 'Duplicate file claim');
+          continue;
+        }
+      }
+
       if (track.file_path && fs.existsSync(track.file_path)) {
         filesVerified++;
-      } else {
-        // File missing at stored path — try to find it at new location first
-        const settings = await prisma.settings.findUnique({ where: { id: 1 } });
-        const outputDir = settings?.music_output_dir || '/music';
-        const foundFile = YTDLPService.findDownloadedFile(outputDir, track.artist, track.title);
+        continue;
+      }
 
-        if (foundFile) {
-          // Found at new location — update path, keep downloaded status
-          filesVerified++;
-          console.log(`[scanner] Updated path for "${track.artist}" - "${track.title}": ${foundFile}`);
-          await prisma.track.update({
-            where: { id: track.id },
-            data: { file_path: foundFile },
-          });
-        } else {
-          // Truly missing — reset to pending for re-download
-          filesNotFound++;
-          console.warn(`[scanner] File not found for "${track.artist}" - "${track.title}": ${track.file_path}`);
-          await prisma.track.update({
-            where: { id: track.id },
-            data: {
-              status: 'pending',
-              download_error: null,
-              retry_count: 0,
-            },
-          });
-        }
+      // File missing at stored path — look for it under this artist's folder.
+      const foundFile = YTDLPService.findDownloadedFile(
+        outputDir, track.artist, track.title, track
+      );
+
+      if (foundFile && !claimedPaths.has(foundFile)) {
+        filesVerified++;
+        console.log(`[scanner] Updated path for "${track.artist}" - "${track.title}": ${foundFile}`);
+        claimedPaths.set(foundFile, [track]);
+        await prisma.track.update({
+          where: { id: track.id },
+          data: { file_path: foundFile },
+        });
+      } else {
+        filesNotFound++;
+        await requeue(track, 'File not found');
       }
     }
 
-    console.log(`[scanner] File verification: ${filesVerified} OK, ${filesNotFound} missing (reset to pending)`);
+    console.log(
+      `[scanner] File verification: ${filesVerified} OK, ${filesNotFound} missing, ` +
+      `${duplicateClaims} duplicate claims (all reset to pending)`
+    );
 
     // Step 2: Check failed tracks - retry if under max retries
     const failedTracks = await prisma.track.findMany({
@@ -693,47 +781,57 @@ async function runFileScanner() {
 }
 
 /**
- * Start or restart the file scanner with interval from settings
+ * Start or restart the file scanner on its configured interval.
+ * Uses a plain timer — see SyncScheduler.start() for why cron was wrong here.
  */
 async function startFileScanner() {
   try {
-    // Stop existing job if running
-    if (scannerJob) {
-      scannerJob.stop();
-      scannerJob = null;
+    if (scannerTimer) {
+      clearInterval(scannerTimer);
+      scannerTimer = null;
     }
 
-    // Load interval from settings
     const settings = await prisma.settings.findFirst();
-    const intervalMinutes = settings?.scan_interval ?? 10;
+    const intervalMinutes = Math.max(1, settings?.scan_interval ?? 10);
 
-    console.log(`[scanner] Scheduling file scan every ${intervalMinutes} minutes`);
+    scannerTimer = setInterval(() => {
+      runFileScanner().catch((err) => console.error('[scanner] File scan error:', err.message));
+    }, intervalMinutes * MINUTE_MS);
 
-    // Build cron expression from interval
-    // For intervals < 60 min use: */N * * * *
-    // For 60 min use: 0 * * * *
-    // For intervals > 60 min, convert to hours if clean, else use minutes
-    const cronExpression = intervalMinutes < 60
-      ? `*/${intervalMinutes} * * * *`
-      : `0 */${Math.floor(intervalMinutes / 60)} * * *`;
-
-    scannerJob = cron.schedule(cronExpression, async () => {
-      try {
-        await runFileScanner();
-      } catch (err) {
-        console.error('[scanner] File scan error:', err.message);
-      }
-    });
-
-    console.log(`[scanner] File scanner started with cron: ${cronExpression}`);
+    console.log(`[scanner] File scanner started, every ${intervalMinutes} minutes`);
   } catch (error) {
     console.error('[scanner] Failed to start file scanner:', error.message);
   }
 }
 
+/**
+ * Keep yt-dlp current.
+ *
+ * The binary is baked into the image at build time, so a long-running container
+ * ends up months behind. YouTube then rejects its download requests outright
+ * (HTTP 403 Forbidden on every track) while search still works — which looks
+ * exactly like "my new songs never download".
+ */
+async function startYtDlpUpdater() {
+  const runUpdate = async () => {
+    try {
+      const { updated, version, error } = await YTDLPService.updateYtDlp();
+      if (updated) {
+        console.log(`[yt-dlp] Up to date (${version})`);
+      } else {
+        console.warn(`[yt-dlp] Self-update failed (running ${version || 'unknown'}): ${error}`);
+      }
+    } catch (err) {
+      console.warn('[yt-dlp] Self-update error:', err.message);
+    }
+  };
+
+  if (ytdlpUpdateTimer) clearInterval(ytdlpUpdateTimer);
+  ytdlpUpdateTimer = setInterval(runUpdate, 24 * 60 * MINUTE_MS);
+  await runUpdate();
+}
+
 module.exports = SyncScheduler;
 module.exports.startFileScanner = startFileScanner;
 module.exports.runFileScanner = runFileScanner;
-module.exports.startFileScanner = startFileScanner;
-module.exports.runFileScanner = runFileScanner;
-
+module.exports.startYtDlpUpdater = startYtDlpUpdater;

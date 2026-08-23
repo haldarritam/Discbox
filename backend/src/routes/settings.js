@@ -117,8 +117,15 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Restart file scanner if interval changed
+    // Restart both timers so a changed interval takes effect immediately.
+    // Previously only the file scanner was restarted, so editing sync_interval
+    // did nothing until the container was restarted.
     await startFileScanner();
+    const syncService = require('./sync').getSyncService();
+    if (syncService) {
+      syncService.stop();
+      await syncService.start({ runInitialSync: false });
+    }
 
     // Mask sensitive keys in response
     const maskedSettings = {
