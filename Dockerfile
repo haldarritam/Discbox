@@ -17,14 +17,24 @@ FROM node:18-alpine
 RUN apk add --no-cache dumb-init openssl ffmpeg python3 py3-pip curl deno
 
 # Install yt-dlp.
-# NOTE: this only pins the build-time version. YouTube breaks older yt-dlp
-# builds every few months (every download starts returning HTTP 403 Forbidden
-# while search keeps working), so the app self-updates the binary at startup and
-# once a day — see startYtDlpUpdater() in src/scheduler.js. That needs the
-# binary to stay writable, hence /usr/local/bin rather than a package install.
+#
+# The ADD below is a cache-buster, not a build input. "curl .../latest/download"
+# is a constant string, so Docker happily reuses a cached layer forever and the
+# image keeps shipping whatever yt-dlp was current the first time it was built —
+# this image was rebuilt repeatedly and silently kept a 5-month-old binary.
+# Fetching the release metadata makes the layer's cache key depend on the actual
+# latest release, so a new upstream release invalidates it.
+ADD https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest /tmp/ytdlp-release.json
+
+# YouTube breaks older yt-dlp builds every few months (every download starts
+# returning HTTP 403 Forbidden while search keeps working), so the app ALSO
+# self-updates the binary at startup and once a day — see startYtDlpUpdater() in
+# src/scheduler.js. That needs the binary to stay writable, hence /usr/local/bin
+# rather than a package install.
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
     -o /usr/local/bin/yt-dlp && \
     chmod +x /usr/local/bin/yt-dlp && \
+    rm -f /tmp/ytdlp-release.json && \
     yt-dlp --version
 
 # Install mutagen for audio metadata tagging

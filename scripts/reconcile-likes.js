@@ -128,7 +128,24 @@ async function main() {
   if (missing.length > 10) console.log(`  ...and ${missing.length - 10} more`);
 
   const removable = [...extras, ...duplicates];
-  const withFiles = removable.filter((t) => t.file_path && fs.existsSync(t.file_path));
+
+  // Never delete audio that a row we are KEEPING still points at. A duplicate
+  // row usually has its own file (its artist string differs, so it downloaded
+  // to a different folder), but nothing guarantees that — and deleting the
+  // surviving track's audio would be silent data loss.
+  const keptPaths = new Set(
+    dbTracks
+      .filter((t) => !removable.some((r) => r.id === t.id))
+      .map((t) => t.file_path)
+      .filter(Boolean)
+  );
+  const shared = removable.filter((t) => t.file_path && keptPaths.has(t.file_path));
+  const withFiles = removable.filter(
+    (t) => t.file_path && !keptPaths.has(t.file_path) && fs.existsSync(t.file_path)
+  );
+  if (shared.length) {
+    console.log(`  (${shared.length} of these share a file with a track being kept — file left alone)`);
+  }
   console.log(`\nWould remove ${removable.length} rows (${withFiles.length} have audio on disk).`);
   console.log(`Resulting count: ${dbTracks.length - removable.length} (target ${expected.size})`);
 
