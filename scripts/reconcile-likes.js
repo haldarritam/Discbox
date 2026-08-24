@@ -30,16 +30,12 @@ const { PrismaClient } = require('@prisma/client');
 const SRC = fs.existsSync(path.join(__dirname, '../backend/src/services/matching.js'))
   ? path.join(__dirname, '../backend/src/services')
   : '/app/src/services';
-const { primaryArtist } = require(path.join(SRC, 'matching'));
+const { trackKey } = require(path.join(SRC, 'matching'));
 const DeezerService = require(path.join(SRC, 'deezer'));
 
 const prisma = new PrismaClient();
 const APPLY = process.argv.includes('--apply');
 const DELETE_FILES = process.argv.includes('--delete-files');
-
-/** Same key sync uses to collapse duplicates across accounts and sources. */
-const dedupeKey = (artist, title) =>
-  `${primaryArtist(artist).toLowerCase()}|${(title || '').toLowerCase()}`;
 
 /** Remove a file, then any album/artist directory it just left empty. */
 function deleteFileAndEmptyParents(filePath) {
@@ -67,17 +63,28 @@ async function main() {
       console.log(`[${label}] sync_loved is off — skipping`);
       continue;
     }
-    const loved = await new DeezerService(account.user_id).getLovedTracks();
+    // A short read here would look exactly like "the user unliked these" and
+    // this script deletes on that basis, so verify against the count Deezer
+    // itself reports before trusting the list.
+    let loved;
+    try {
+      loved = await new DeezerService(account.user_id).getLovedTracks();
+    } catch (err) {
+      console.error(`[${label}] ${err.message}`);
+      console.error('Aborting: refusing to reconcile against an incomplete list.');
+      process.exitCode = 1;
+      return;
+    }
     console.log(`[${label}] ${loved.length} loved tracks on Deezer`);
     for (const track of loved) {
-      const key = dedupeKey(track.artist, track.title);
+      const key = trackKey(track.artist, track.title);
       if (!expected.has(key)) expected.set(key, { ...track, label });
     }
   }
 
   const manualTracks = await prisma.track.findMany({ where: { account_label: 'manual' } });
   for (const track of manualTracks) {
-    expected.set(dedupeKey(track.artist, track.title), { manual: true });
+    expected.set(trackKey(track.artist, track.title), { manual: true });
   }
 
   console.log(
@@ -96,7 +103,7 @@ async function main() {
     if (track.status === 'blocked') continue;         // deliberately suppressed
     if (track.account_label === 'manual') continue;   // hand-added, always keep
 
-    const key = dedupeKey(track.artist, track.title);
+    const key = trackKey(track.artist, track.title);
     if (!expected.has(key)) {
       extras.push(track);
     } else if (seen.has(key)) {

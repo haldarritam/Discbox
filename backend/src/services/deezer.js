@@ -7,12 +7,31 @@ class DeezerService {
     this.userId = userId;
   }
 
+  /**
+   * Fetch every page of a Deezer collection.
+   *
+   * Stops only when Deezer says there is no `next` page. It used to also stop on
+   * `items.length < limit`, but Deezer returns short pages while more results
+   * remain (it filters unavailable tracks out of a page after slicing), so that
+   * check silently truncated the list. A truncated "loved tracks" list is
+   * dangerous: anything reconciling the library against it concludes the missing
+   * tracks were unliked and deletes them.
+   *
+   * Throws on a short read rather than returning a partial list, so callers
+   * cannot mistake "the API gave up early" for "the user unliked these".
+   *
+   * @param {string} url
+   * @returns {Promise<Array>}
+   */
   async fetchPaginated(url) {
     const results = [];
     let index = 0;
     const limit = 50;
+    let total = null;
+    // Deezer caps collections well below this; it only stops a runaway loop.
+    const maxPages = 1000;
 
-    while (true) {
+    for (let page = 0; page < maxPages; page++) {
       const response = await axios.get(url, {
         params: { index, limit },
         timeout: 10000,
@@ -24,11 +43,21 @@ class DeezerService {
         throw new Error(`Deezer API error: ${data.error.message} (code ${data.error.code})`);
       }
 
+      if (total === null && typeof data.total === 'number') total = data.total;
+
       const items = data.data || [];
       results.push(...items);
 
-      if (!data.next || items.length < limit) break;
+      // An empty page with `next` still set would loop forever.
+      if (!data.next || items.length === 0) break;
       index += limit;
+    }
+
+    if (total !== null && results.length < total) {
+      throw new Error(
+        `Incomplete fetch from ${url}: got ${results.length} of ${total} items. ` +
+        'Refusing to return a partial list.'
+      );
     }
 
     return results;

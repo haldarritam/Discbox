@@ -3,7 +3,7 @@ const { PrismaClient } = require('@prisma/client');
 const LastFMService = require('./services/lastfm');
 const YTDLPService = require('./services/ytdlp');
 const DeezerService = require('./services/deezer');
-const { primaryArtist, durationMatches } = require('./services/matching');
+const { trackKey, durationMatches } = require('./services/matching');
 
 const prisma = new PrismaClient();
 
@@ -37,18 +37,6 @@ const MAX_CANDIDATES_PER_TRACK = 3;
  *
  * @returns {Promise<Object|null>} the updated row, or null if it is gone
  */
-/**
- * The key a track is deduplicated by: primary artist + title, lowercased.
- *
- * Collection and insertion MUST agree on this. They used to disagree — tracks
- * were collapsed by primary artist, but the "do we already have this?" lookup
- * compared the full artist string. So "Pritam, Atif Aslam - Song" was inserted
- * alongside an existing "Pritam - Song", and every sync minted more duplicate
- * rows for the same song.
- */
-const trackKey = (artist, title) =>
-  `${primaryArtist(artist).toLowerCase()}\u0000${(title || '').toLowerCase()}`;
-
 async function safeTrackUpdate(id, data) {
   try {
     return await prisma.track.update({ where: { id }, data });

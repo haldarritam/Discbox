@@ -108,6 +108,24 @@ function primaryArtist(artist) {
 }
 
 /**
+ * The identity of a track: primary artist + title, normalized.
+ *
+ * Used for BOTH "have we already got this?" during sync and "is this still
+ * loved?" during reconcile — they must agree or the two fight each other.
+ *
+ * normalize() rather than toLowerCase() because sources rename artists:
+ * Deezer's "Jason Derülo" became "Jason Derulo", which under a case-only key
+ * reads as a different artist. Sync then added a second row for every one of
+ * his tracks while reconcile deleted the original, forever.
+ *
+ * @param {string} artist
+ * @param {string} title
+ * @returns {string}
+ */
+const trackKey = (artist, title) =>
+  `${normalize(primaryArtist(artist))}\u0000${normalize(title)}`;
+
+/**
  * How far a candidate's runtime may sit from the reference (Deezer) runtime.
  * Encoders and intros/outros wobble a few seconds; anything beyond this is a
  * different edit, a truncated rip, or an entirely different song.
@@ -153,6 +171,7 @@ module.exports = {
   tokens,
   coverage,
   primaryArtist,
+  trackKey,
   durationTolerance,
   durationMatches,
   unwantedVariantMarkers,
