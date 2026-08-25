@@ -68,6 +68,64 @@ function tokens(normalized) {
 }
 
 /**
+ * Levenshtein edit distance, two-row variant.
+ * @param {string} a
+ * @param {string} b
+ * @returns {number}
+ */
+function editDistance(a, b) {
+  if (a === b) return 0;
+  if (!a.length || !b.length) return Math.max(a.length, b.length);
+
+  const row = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) row[j] = j;
+
+  for (let i = 1; i <= a.length; i++) {
+    let diagonal = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const previous = row[j];
+      row[j] = Math.min(
+        row[j] + 1,                                        // deletion
+        row[j - 1] + 1,                                    // insertion
+        diagonal + (a[i - 1] === b[j - 1] ? 0 : 1)         // substitution
+      );
+      diagonal = previous;
+    }
+  }
+  return row[b.length];
+}
+
+/**
+ * Do two tokens refer to the same word?
+ *
+ * Exact match, or close enough to be a spelling variant. Romanized Hindi/Urdu/
+ * Arabic titles have no canonical spelling — Deezer's "Nadaan Parindey" is
+ * YouTube's "Nadaan Parinde", "Aasmaan" is "Asmaan" — and requiring exact
+ * tokens rejected those outright.
+ *
+ * Fuzziness is earned by length: tokens under 6 characters must match exactly,
+ * because plenty of distinct short English words sit one edit apart — love/live,
+ * rain/pain, heart/heard. Longer tokens get one edit, 8+ get two.
+ *
+ * This leans slightly permissive on purpose. A false negative here means a track
+ * silently never downloads; a false positive still has to clear the duration and
+ * artist gates before anything is written to disk.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+function tokensMatch(a, b) {
+  if (a === b) return true;
+  const shortest = Math.min(a.length, b.length);
+  if (shortest < 6) return false;
+  const allowed = shortest >= 8 ? 2 : 1;
+  if (Math.abs(a.length - b.length) > allowed) return false;
+  return editDistance(a, b) <= allowed;
+}
+
+/**
  * Fraction of `needle`'s tokens that appear in `haystack`. Returns 0 for an
  * empty needle so a blank/unnormalizable string never counts as a match.
  * @param {string} needle
@@ -77,11 +135,15 @@ function tokens(normalized) {
 function coverage(needle, haystack) {
   const needleTokens = tokens(needle);
   if (needleTokens.length === 0) return 0;
-  const haystackTokens = new Set(tokens(haystack));
-  if (haystackTokens.size === 0) return 0;
+  const haystackTokens = tokens(haystack);
+  if (haystackTokens.length === 0) return 0;
+
+  const exact = new Set(haystackTokens);
   let hits = 0;
   for (const token of needleTokens) {
-    if (haystackTokens.has(token)) hits++;
+    if (exact.has(token) || haystackTokens.some((other) => tokensMatch(token, other))) {
+      hits++;
+    }
   }
   return hits / needleTokens.length;
 }
@@ -169,6 +231,8 @@ module.exports = {
   normalizeTitle,
   sanitizeFilename,
   tokens,
+  editDistance,
+  tokensMatch,
   coverage,
   primaryArtist,
   trackKey,
