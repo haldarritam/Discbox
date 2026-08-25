@@ -458,6 +458,7 @@ class SyncScheduler {
     const candidates = await YTDLPService.searchCandidates(track.artist, track.title, {
       preference: settings.search_preference || 'auto',
       expectedDuration: track.duration || null,
+      album: track.album_name || null,
     });
 
     return { manual: false, candidates };

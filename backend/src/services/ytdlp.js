@@ -109,30 +109,13 @@ class YTDLPService {
   }
 
   /**
-   * Search YouTube and return every plausible candidate, best first.
-   *
-   * Scoring is gated, not purely additive: a candidate has to actually look like
-   * the requested artist + title, and — when the source (Deezer) told us how long
-   * the track runs — has to run for about that long. Without those gates an
-   * unrelated 3-minute video scored a single point (just for being 2-8 minutes
-   * long) and was downloaded as if it were the track.
-   *
-   * @param {string} artist
-   * @param {string} title
-   * @param {Object} options - { preference, expectedDuration, limit }
-   * @returns {Promise<Array>} [{ url, videoId, title, duration, channelName, score }]
+   * Run one ytsearch query and return the raw flat-playlist entries.
+   * @param {string} query
+   * @param {number} limit
+   * @returns {Promise<Array>}
    */
-  static async searchCandidates(artist, title, options = {}) {
-    const {
-      preference = 'auto',
-      expectedDuration = null,
-      limit = 10,
-    } = options;
-
-    const suffix = preference === 'lyrics' ? 'lyrics' : 'official audio';
-    const query = `${artist} ${title} ${suffix}`;
-
-    const raw = await new Promise((resolve, reject) => {
+  static async runSearch(query, limit) {
+    return new Promise((resolve, reject) => {
       const proc = spawn('yt-dlp', [
         `ytsearch${limit}:${query}`,
         '--dump-json',
@@ -163,17 +146,65 @@ class YTDLPService {
 
       proc.on('error', reject);
     });
+  }
+
+  /**
+   * Search YouTube and return every plausible candidate, best first.
+   *
+   * Scoring is gated, not purely additive: a candidate has to actually look like
+   * the requested artist + title, and — when the source told us how long the
+   * track runs — has to run for about that long. Without those gates an
+   * unrelated 3-minute video scored a single point (just for being 2-8 minutes
+   * long) and was downloaded as if it were the track.
+   *
+   * Several queries are tried rather than one. A single phrasing is fragile:
+   * YouTube's search returns NOTHING for "Hayajan Nude" (its safety filter
+   * suppresses results when a term like "nude" dominates a short query), while
+   * "Radiohead Nude" and "Hayajan Ya Bay" — the same artist plus his album —
+   * both return the track. Appending "official audio" narrows it further still.
+   * So we widen progressively and stop at the first query that yields a
+   * candidate passing the gates; the gates, not the query, do the filtering.
+   *
+   * @param {string} artist
+   * @param {string} title
+   * @param {Object} options - { preference, expectedDuration, album, limit }
+   * @returns {Promise<Array>} [{ url, videoId, title, duration, channelName, score }]
+   */
+  static async searchCandidates(artist, title, options = {}) {
+    const {
+      preference = 'auto',
+      expectedDuration = null,
+      album = null,
+      limit = 10,
+    } = options;
+
+    const suffix = preference === 'lyrics' ? 'lyrics' : 'official audio';
+    const queries = [
+      { query: `${artist} ${title} ${suffix}`, limit },
+      { query: `${artist} ${title}`, limit },
+    ];
+    // Artist + album avoids the track title entirely, which is what rescues a
+    // title YouTube's search refuses to answer. Skip it when the album is just
+    // the track name again (singles), since that repeats an earlier query.
+    //
+    // It needs a deeper search than the title queries: it returns the artist's
+    // whole catalogue rather than one song, so the track we want sits well down
+    // the list (for "Hayajan Ya Bay" it is past the 10th result).
+    if (album && normalize(album) !== normalize(title)) {
+      queries.push({ query: `${artist} ${album}`, limit: limit * 3 });
+    }
 
     const wantedTitle = normalizeTitle(title);
     const wantedArtist = normalize(primaryArtist(artist));
 
     /**
+     * @param {Array} raw - candidate entries gathered so far
      * @param {boolean} strictDuration - true: candidate must sit inside the
      *   normal tolerance. false: allow +/-25% but demand a perfect title match,
      *   so a track whose only upload is a music video with a long intro can
      *   still be found instead of failing outright.
      */
-    const evaluate = (strictDuration) => {
+    const evaluate = (raw, strictDuration) => {
       const scored = [];
 
       for (const result of raw) {
@@ -240,10 +271,26 @@ class YTDLPService {
         .sort((a, b) => b.score - a.score);
     };
 
-    const strict = evaluate(true);
-    if (strict.length > 0) return strict;
+    const seen = new Map();
+    let relaxed = [];
 
-    const relaxed = expectedDuration ? evaluate(false) : [];
+    for (const [index, { query, limit: queryLimit }] of queries.entries()) {
+      for (const result of await YTDLPService.runSearch(query, queryLimit)) {
+        if (result.id && !seen.has(result.id)) seen.set(result.id, result);
+      }
+      if (seen.size === 0) continue;
+
+      const raw = [...seen.values()];
+      const strict = evaluate(raw, true);
+      if (strict.length > 0) {
+        if (index > 0) {
+          console.log(`[yt-dlp] "${artist} - ${title}" matched via fallback query: "${query}"`);
+        }
+        return strict;
+      }
+      relaxed = expectedDuration ? evaluate(raw, false) : [];
+    }
+
     if (relaxed.length > 0) {
       console.log(
         `[yt-dlp] No exact-length match for "${artist} - ${title}" (~${expectedDuration}s); ` +
